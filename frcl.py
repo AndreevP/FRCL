@@ -36,7 +36,7 @@ class FRCL(nn.Module):
                                                      phi[i][None, :] @ cov @ phi[i][:, None])
             elbo += self.quadr(loglik, sample_dist)
 
-        elbo = -kl_divergence(self.w_distr, self.w_prior)
+        elbo -= kl_divergence(self.w_distr, self.w_prior)
 
         for i in range(len(self.prev_tasks_distr)):
             phi_i = self.base(self.prev_tasks_tensors[i])
