@@ -1,10 +1,12 @@
 import torch
 import torch.nn as nn
 
+#TODO: implement initialization using custom torch.generator
 class MnistModel(nn.Module):
 
     def __init__(self, hid):
         super().__init__()
+        self.hid = hid
 
         self.layers = nn.Sequential(
             nn.Linear(784, hid),
