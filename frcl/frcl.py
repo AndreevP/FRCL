@@ -2,10 +2,11 @@ import torch
 import torch.nn as nn
 from torch.nn import ParameterList, Parameter
 import torch.nn.functional as F
-from torch.utils.data import Subset
+from torch.utils.data import Subset, DataLoader
 from torch.distributions.multivariate_normal import MultivariateNormal
 from .quadrature import GaussHermiteQuadrature1D
 from torch.distributions.kl import kl_divergence
+import abc
 
 
 def create_torch_random_gen(value):
@@ -23,9 +24,14 @@ def create_torch_random_gen(value):
         " by int, None or via torch.Generator instance, "
         " got {} instead".format(type(value)))
 
-class CLBaseline(nn.Module):
+class CLBaseline(nn.Module, abc.ABC):
 
-    def __init__(self, base_model, h_dim, out_dim=1, device='cpu', seed=None):
+    def __len__(self):
+        return len(self.tasks_replay_buffers)
+
+    def __init__(
+        self, base_model, h_dim, out_dim=1, device='cpu', 
+        seed=None):
         '''
         :Parameters:
         base_model: torch.nn.Module: task-agnostic model
@@ -34,7 +40,6 @@ class CLBaseline(nn.Module):
         (dimension of loss_function input)
         '''
         super().__init__()
-
         self.base = base_model
         self.h_dim = h_dim
         self.out_dim = out_dim
@@ -43,8 +48,6 @@ class CLBaseline(nn.Module):
         self.tasks_replay_buffers = []
         #task-specific tensors (which applied to base model outputs)
         self.tasks_omegas = ParameterList()
-        self.input_classes_transformers = []
-        self.hidden_classes_transformers = []
 
         if out_dim == 1:
             # computes loss
@@ -63,8 +66,16 @@ class CLBaseline(nn.Module):
         
         self.torch_gen = create_torch_random_gen(seed)
         self.to(self.device)
+
+    @abc.abstractmethod
+    def forward(self, cl_batch):
+        pass
+
+    @abc.abstractmethod
+    def create_replay_buffer(self, dataset):
+        pass
     
-    def create_new_task(self, classes):
+    def create_new_task(self):
         '''
         Create new task-specific tensor \omega
         :Parameters:
@@ -73,51 +84,10 @@ class CLBaseline(nn.Module):
         w = Parameter(torch.randn(
             (self.out_dim, self.h_dim), generator=self.torch_gen)).to(self.device)
         self.tasks_omegas.append(w)
-        classes.sort()
-
-        def input_classes_transform(tsr):
-            for i, _cls in enumerate(classes):
-                tsr[tsr == _cls] = i
-            return tsr
-        
-        def output_classes_transform(tsr):
-            for i in range(len(classes)):
-                tsr[tsr == i] = classes[i]
-            return tsr
-        
-        self.input_classes_transformers.append(input_classes_transform)
-        self.hidden_classes_transformers.append(output_classes_transform)
-
-    def forward(self, cl_batch):
-        '''
-        Returns the objective with respect to (x, target)
-        '''
-        if len(self.tasks_omegas) == 0:
-            raise Exception("No tasks have been created yet!")
-
-        # some consistency check
-        assert(len(self.tasks_omegas) == 1 + len(self.tasks_replay_buffers))
-        assert(len(cl_batch) == len(self.tasks_omegas))
-
-        main_batch_size = cl_batch[-1][0].size(0)
-        main_transform = self.input_classes_transformers[-1]
-        loss = self.loss_func(
-            torch.matmul(self.base(cl_batch[-1][0]), self.tasks_omegas[-1].T).squeeze(),
-            main_transform(cl_batch[-1][1]))
-
-        for i in range(len(self.tasks_replay_buffers)):
-            omega = self.tasks_omegas[i]
-            x = cl_batch[i][0]
-            target = cl_batch[i][1]
-            transform = self.input_classes_transformers[i]
-            curr_unb_loss = self.loss_func(
-                torch.matmul(self.base(x), omega.T).squeeze(), 
-                transform(target))
-            curr_batch_size = cl_batch[i][0].size(0)
-            assert(curr_unb_loss >= 0.)
-            loss += main_batch_size/float(curr_batch_size) * curr_unb_loss
-        assert(loss >= 0.)
-        return loss
+    
+    def _compute_task_loss(self, k, X, target):
+        omega = self.tasks_omegas[k]
+        return self.loss_func(torch.matmul(self.base(X), omega.T).squeeze(), target)
     
     @torch.no_grad()
     def predict(self, x, k, get_class=False):
@@ -132,13 +102,12 @@ class CLBaseline(nn.Module):
         assert(k >= 0)
         assert(k < len(self.tasks_omegas))
         omega = self.tasks_omegas[k]
-        hidden_transformer = self.hidden_classes_transformers[k]
         distr = self.pred_func(torch.matmul(self.base(x), omega.T).squeeze())
         if get_class:
             if len(distr.shape) == 1:
-                return hidden_transformer(torch.argmax(distr).cpu()).item()
+                return torch.argmax(distr).cpu().item()
             else:
-                return hidden_transformer(torch.argmax(distr, dim=-1).cpu()).numpy()
+                return torch.argmax(distr, dim=-1).cpu().numpy()
         else:
             return distr.cpu()
     
@@ -153,10 +122,51 @@ class CLBaseline(nn.Module):
         if criterion == "random":
             indices = torch.randperm(len(task_dataset), generator=self.torch_gen).numpy()
             select_indices = indices[:N]
-            self.tasks_replay_buffers.append(Subset(task_dataset, select_indices))
+            self.create_replay_buffer(Subset(task_dataset, select_indices))
         else:
             raise Exception(
                 "Criterion {} not implemented".format(criterion))
+
+class DeterministicCLBaseline(CLBaseline):
+
+    def forward(self, X, target):
+        '''
+        returns the objective with respect to the (X, target)
+        '''
+        loss = self._compute_task_loss(-1, X, target)
+        for i, repl_buffer in enumerate(self.tasks_replay_buffers):
+            curr_X, curr_target = repl_buffer
+            curr_loss = self._compute_task_loss(i, curr_X, curr_target)
+            # curr_loss *= X.size(0)/float(curr_X.size(0))
+            loss += curr_loss
+        return loss
+    
+    def create_replay_buffer(self, dataset):
+        dataloader = DataLoader(dataset, batch_size=len(dataset))
+        self.tasks_replay_buffers.append(next(iter(dataloader)))
+
+
+class StochasticCLBaseline(CLBaseline):
+
+    def forward(self, cl_batch):
+        '''
+        returns the objective with respect to the cl_batch
+        '''
+
+        # main_batch_size = cl_batch[-1][0].size(0)
+        loss = 0.0
+        for i in range(len(self.tasks_omegas)):
+            omega = self.tasks_omegas[i]
+            x = cl_batch[i][0]
+            target = cl_batch[i][1]
+            curr_unb_loss = self._compute_task_loss(i, x, target)
+            # curr_batch_size = cl_batch[i][0].size(0)
+            # loss += main_batch_size/float(curr_batch_size) * curr_unb_loss
+            loss += curr_unb_loss
+        return loss 
+    
+    def create_replay_buffer(self, dataset):
+        self.tasks_replay_buffers.append(dataset)
 
 
 class FRCL(nn.Module):
@@ -173,6 +183,9 @@ class FRCL(nn.Module):
         self.quadr = GaussHermiteQuadrature1D().to(device)
         self.prev_tasks_distr = [] #previous tasks as torch distributions
         self.prev_tasks_tensors = [] #previous tasks as torch tensors
+    
+    def __len__(self):
+        return len(self.prev_tasks_tensors)
        
     def forward(self, x, target, N_k):
         """

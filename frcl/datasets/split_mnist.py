@@ -4,6 +4,10 @@ from torch.utils.data import Dataset
 
 class SplitMnistDataset(Dataset):
 
+    @staticmethod
+    def is_positive(x):
+        return float(x > 0)
+
     def __init__(
         self, lbl_1, lbl_2, 
         train=True, data_root="../data/", normalize=False):
@@ -42,7 +46,7 @@ class SplitMnistDataset(Dataset):
         if self.normalize:
             tsr -= torch.mean(tsr)
             tsr /= (1e-7 + torch.std(tsr))
-        return (tsr.view(-1), _cls - min(self.lbl_1, self.lbl_2)) #return binary labels
+        return (tsr.view(-1), self.is_positive(_cls - min(self.lbl_1, self.lbl_2))) #return binary labels
     
     def __len__(self):
         return len(self.dataset_indices)
