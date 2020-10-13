@@ -196,8 +196,8 @@ class FRCL(nn.Module):
         for i in range(len(self.prev_tasks_distr)):
             phi_i = self.base(self.prev_tasks_tensors[i])
             cov_i = phi_i @ phi_i.T
-            p_u = MultivariateNormal(torch.zeros(phi_i.shape[0]).to(self.device),
-                                     scale_tril=phi_i)#cov_i * self.sigma_prior)
+            p_u = MultivariateNormal(torch.zeros(cov_i.shape[0]).to(self.device),
+                                     covariance_matrix=cov_i)#cov_i * self.sigma_prior)
             kls -= kl_divergence(self.prev_tasks_distr[i], p_u)
         elbo += kls / N_k
 

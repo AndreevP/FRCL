@@ -42,7 +42,7 @@ class SplitMnistDataset(Dataset):
         if self.normalize:
             tsr -= torch.mean(tsr)
             tsr /= (1e-7 + torch.std(tsr))
-        return (tsr.view(-1), _cls)
+        return (tsr.view(-1), _cls - min(self.lbl_1, self.lbl_2)) #return binary labels
     
     def __len__(self):
         return len(self.dataset_indices)
