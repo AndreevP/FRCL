@@ -6,6 +6,8 @@ from torch.utils.data import Subset, DataLoader
 from torch.distributions.multivariate_normal import MultivariateNormal
 from .quadrature import GaussHermiteQuadrature1D
 from torch.distributions.kl import kl_divergence
+from copy import copy
+from scipy.stats import ttest_ind
 import abc
 
 
@@ -173,6 +175,7 @@ class FRCL(nn.Module):
     def __init__(self, base_model, h_dim, device, sigma_prior=1):
         super(FRCL, self).__init__()
         self.device = device
+        self.h_dim = h_dim
         self.base = base_model.to(device)
         self.sigma_prior = sigma_prior
         self.L = Parameter(torch.eye(h_dim), requires_grad=True).to(device)
@@ -217,7 +220,7 @@ class FRCL(nn.Module):
         return -elbo 
 
     @torch.no_grad()
-    def get_predictive(self, x, k):
+    def get_predictive(self, x, k, return_distr=True):
         """ Computes predictive distribution according to section 2.5
             x - batch of data
             k - index of task
@@ -236,7 +239,7 @@ class FRCL(nn.Module):
         sigma = k_xx + k_xz @ k_zz_ @ (cov_u  - k_zz) @ k_zz_ @ k_xz.T
         sigma *= torch.eye(sigma.shape[0]).to(self.device) #we are interested only 
                                                            #in diagonal part for inference
-        return MultivariateNormal(loc=mu, covariance_matrix=sigma)
+        return MultivariateNormal(loc=mu, covariance_matrix=sigma) if return_distr else (mu, sigma)
 
     @torch.no_grad()
     def predict(self, x, k, MC_samples=20):
@@ -259,32 +262,98 @@ class FRCL(nn.Module):
         """Given task dataloader compute N inducing points
            Updates self.prev_tasks_distr and self.prev_tasks_tensors
         """
+        
         if (criterion=="random"):
-            smp = torch.utils.data.DataLoader(task_dataloader.dataset,
+            random_points = torch.utils.data.DataLoader(task_dataloader.dataset,
                                               batch_size=N,
                                               shuffle=True)
-            X, y = next(iter(smp))
-            X = X.to(self.device)
-            phi = self.base(X)
-            mu_u = phi @ self.mu
-            L_u = phi @ self.L
-            cov = L_u @ L_u.T
-            self.prev_tasks_distr.append(MultivariateNormal(loc=mu_u,
-                                                            covariance_matrix=cov))
-            self.prev_tasks_tensors.append(X)
-            return
+            Z, _ = next(iter(random_points))
+            Z = Z.to(self.device)
+
+        if (criterion=="deterministic"):
+
+            def calculate_induce_quality_statistic(all_points, inducing):
+                """calculates trace statistic of inducing cquality"""
+                phi_x = self.base(all_points)
+                phi_z = self.base(inducing)
+                k_xx = phi_x @ phi_x.T
+                k_xz = phi_x @ phi_z.T
+                k_zz = phi_z @ phi_z.T
+                return torch.trace(k_xx - k_xz @ torch.inverse(k_zz) @ k_xz.T)
+            
+            def find_best_inducing_points(start_inducing_set="random",
+                                          task_dataloader=task_dataloader, 
+                                          max_iter=1000, return_statistic=False):
+                
+                """Sequentially adds a new point instead of a random one in
+                the initial set of inducing points, if the value of the statstic
+                above lessens and does not do anything otherwise.
+
+                - start_inducing_set: list of points to start from
+                - max_iter: maximum number of tries to add a point
+                """
+                
+                if start_inducing_set == "random":
+                    random_points = torch.utils.data.DataLoader(task_dataloader.dataset,
+                                              batch_size=N,
+                                              shuffle=False)
+                    Z, _ = next(iter(random_points))
+                    Z = Z.to(self.device)
+                else:
+                    assert len(start_inducing_set) == N 
+                    assert isinstance(start_inducing_set[0], torch.Tensor)
+                    Z = start_inducing_set.to(self.device)
+                 
+                all_points = [elem[0] for elem in task_dataloader.dataset]
+                
+                potential_points = torch.utils.data.DataLoader(task_dataloader.dataset,
+                                              batch_size=max_iter,
+                                              shuffle=True)
+                
+                for point, _ in potential_points:
+                    Z_new = Z.copy()
+                    Z_new[np.random.randint(0, N - 1)] = point
+                    T = calculate_induce_quality_statistic(all_points, Z)
+                    T_new = calculate_induce_quality_statistic(all_points, Z_new)
+                    if T_new < T:
+                        Z = Z_new
+                
+                return Z, min(T, T_new) if return_statistic else Z
+            
+            Z = find_best_inducing_points()
+        
+        phi = self.base(Z)
+        mu_u = phi @ self.mu
+        L_u = phi @ self.L
+        cov = L_u @ L_u.T
+        self.prev_tasks_distr.append(MultivariateNormal(loc=mu_u,
+                                                        covariance_matrix=cov))
+        self.prev_tasks_tensors.append(Z)
+        return
             
                 
     @torch.no_grad()
-    def detect_boundary(self, x, l_old):
+    def detect_boundary(self, x, l_old, return_p_value=False):
         """Given new batch x and kl divergence for previous minibatch l_old
            compute l_new and perform statistical test
            Returns l_new and indicator of significance (0 or 1)
         """
-        pass
-
-            
-            
-
+        assert len(x) == len(l_old)
+        
+        def gaus_sym_kl(p_mu, p_var, q_mu, q_var, dim=1):
+            inv_p_var = torch.inverse(p_var)
+            inv_q_var = torch.inverse(q_var)
+            return (torch.trace(inv_p_var @ q_var + inv_q_var @ p_var) - 2 * dim + \
+               (p_mu - q_mu).T @ (inv_p_var + inv_q_var) @ (p_mu - q_mu)) / 4
+        
+        phi_x = self.base(x)
+        p_vars = torch.diagonal(phi_x @ phi_x.T, 0)
+        p_mus = torch.zeros(len(l_old))
+        q_mus, q_covar_matrix = self.get_predictive(x, -1, return_distr=False)
+        q_vars = torch.diagonal(q_covar_matrix, 0)
+        l_new = torch.Tensor([gaus_sym_kl(p_mus[i], p_vars[i], q_mus[i], q_vars[i]) for i in range(len(l_old))])
+        t, p_value = ttest_indest_ind(l_old, l_new, equal_var=False)    
+        return l_new, t, p if return_p_value else l_new, t
+    
 if __name__ == "__main__":
     clb = CLBaseline(None, None)
