@@ -82,7 +82,7 @@ class CLBaseline(nn.Module, abc.ABC):
         classes: list: list of target classes
         '''
         w = Parameter(torch.randn(
-            (self.out_dim, self.h_dim), generator=self.torch_gen)).to(self.device)
+            (self.out_dim, self.h_dim), generator=self.torch_gen).to(self.device))
         self.tasks_omegas.append(w)
     
     def _compute_task_loss(self, k, X, target):
@@ -99,6 +99,7 @@ class CLBaseline(nn.Module, abc.ABC):
         get_class: bool: if False, returns the predictive probability
         distribution over the classes, othervise returns the predicted class
         '''
+        x = x.to(self.device)
         assert(k >= 0)
         assert(k < len(self.tasks_omegas))
         omega = self.tasks_omegas[k]
@@ -136,7 +137,7 @@ class DeterministicCLBaseline(CLBaseline):
         loss = self._compute_task_loss(-1, X, target)
         for i, repl_buffer in enumerate(self.tasks_replay_buffers):
             curr_X, curr_target = repl_buffer
-            curr_X.to(self.device)
+            curr_X = curr_X.to(self.device)
             curr_target = curr_target.float().to(self.device)
             curr_loss = self._compute_task_loss(i, curr_X, curr_target)
             # curr_loss *= X.size(0)/float(curr_X.size(0))
