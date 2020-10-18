@@ -136,6 +136,8 @@ class DeterministicCLBaseline(CLBaseline):
         loss = self._compute_task_loss(-1, X, target)
         for i, repl_buffer in enumerate(self.tasks_replay_buffers):
             curr_X, curr_target = repl_buffer
+            curr_X.to(self.device)
+            curr_target = curr_target.float().to(self.device)
             curr_loss = self._compute_task_loss(i, curr_X, curr_target)
             # curr_loss *= X.size(0)/float(curr_X.size(0))
             loss += curr_loss
