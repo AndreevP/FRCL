@@ -6,7 +6,7 @@ class SplitMnistDataset(Dataset):
 
     @staticmethod
     def is_positive(x):
-        return float(x > 0)
+        return int(x > 0.1)
 
     def __init__(
         self, lbl_1, lbl_2, 

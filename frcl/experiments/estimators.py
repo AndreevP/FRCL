@@ -46,7 +46,11 @@ class AccuracyTaskEstimator(TaskEstimator):
     def estimate(self, cl_solver):
         acc = 0.
         for x, target in self.test_dataloader:
-            x_pred = torch.argmax(cl_solver.predict(x, self.n), dim=-1).cpu().numpy()
+            prediction = cl_solver.predict(x, self.n)
+            if len(prediction.shape) > 1:
+                x_pred = torch.argmax(prediction, dim=-1).cpu().numpy()
+            else:
+                x_pred = (prediction.cpu().numpy() > 1/2).astype(int)
             acc += np.sum(x_pred == target.cpu().numpy())
         acc /= len(self.test_dataloader.dataset)
         return acc
