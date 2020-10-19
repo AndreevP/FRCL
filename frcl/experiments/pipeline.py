@@ -40,7 +40,7 @@ class Pipeline(abc.ABC):
 
     def __init__(self, task_provider, n_inducing=10, 
         inducing_criterion='random', n_repeat=10, device='cuda', 
-        batch_size=32, lr=1e-3, n_epochs=10):
+        batch_size=32, lr=1e-3, n_epochs=10, n_classes=2):
         '''
         :Parameters:
         task_provider: provider for subsequent tasks, must implement __getitem__, 
@@ -54,6 +54,8 @@ class Pipeline(abc.ABC):
         n_epochs : int or list of ints : count of epochs used for training each task
         '''
 
+        self.n_classes=n_classes
+        self.out_dim = 1 if self.n_classes == 2 else self.n_classes
         self.task_provider = task_provider
         self.n_inducing = n_inducing
         self.inducing_criterion = inducing_criterion
@@ -179,9 +181,11 @@ class Pipeline(abc.ABC):
                     for i_batch, batch in enumerate(self.train_dl):
                         self.i_batch = i_batch
                         self.optim.zero_grad()
-                        self.X = batch[0].to(self.device)
-                        self.target = batch[1].float().to(self.device)
+                        self.X = batch[0]
+                        self.target = batch[1]
                         self._before_batch_train()
+                        self.X = self.X.to(self.device)
+                        self.target = self.target.to(self.device)
                         self.loss = self.compute_loss()
                         self.loss.backward()
                         self._after_batch_train()
@@ -254,18 +258,22 @@ class BaselinePipeline(Pipeline):
     training baseline model
     '''
 
-    def __init__(self, *args, n_classes=2, **kwargs):
+    def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.n_classes = n_classes
 
     def create_cl_model(self):
-        out_dim = 1 if self.n_classes == 2 else self.n_classes
         cl_model = DeterministicCLBaseline(
-            self.base_model, self.base_model.hid, out_dim=out_dim)
+            self.base_model, self.base_model.hid, out_dim=self.out_dim, device=self.device)
         return cl_model
 
     def before_task_train(self):
         self.cl_model.create_new_task()
+    
+    def before_batch_train(self):
+        if self.n_classes == 2:
+            self.target = self.target.float()
+            return
+        self.target = self.target.long()
     
     def after_task_train(self):
         self.cl_model.select_inducing(
@@ -286,8 +294,15 @@ class FRCLPipeline(Pipeline):
 
     def create_cl_model(self):
         cl_model = FRCL(
-            self.base_model, self.base_model.hid, self.device, sigma_prior=self.sigma_prior)
+            self.base_model, self.base_model.hid, 
+            self.device, sigma_prior=self.sigma_prior, out_dim = self.out_dim)
         return cl_model
+
+    def before_batch_train(self):
+        if self.n_classes == 2:
+            self.target = self.target.float()
+            return
+        self.target = self.target.long()
     
     def after_task_train(self):
         self.cl_model.select_inducing(
@@ -295,7 +310,7 @@ class FRCLPipeline(Pipeline):
 
     def compute_loss(self):
         return self.cl_model(
-            self.X, self.target * 2. - 1., len(self.train_dl) * self.batch_size[self.i_task])
+                self.X, self.target, len(self.train_dl) * self.batch_size[self.i_task])
 
 class BaselineTrainDemo(BaselinePipeline, AccEstPipeline, LossEstPipeline):
     '''

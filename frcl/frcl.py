@@ -8,6 +8,15 @@ from .quadrature import GaussHermiteQuadrature1D
 from torch.distributions.kl import kl_divergence
 import abc
 
+def moveaxis(tensor: torch.Tensor, source: int, destination: int) -> torch.Tensor:
+    dim = tensor.dim()
+    perm = list(range(dim))
+    if destination < 0:
+        destination += dim
+    perm.pop(source)
+    perm.insert(destination, source)
+    return tensor.permute(*perm)
+
 
 def create_torch_random_gen(value):
     gen = torch.Generator()
@@ -138,7 +147,10 @@ class DeterministicCLBaseline(CLBaseline):
         for i, repl_buffer in enumerate(self.tasks_replay_buffers):
             curr_X, curr_target = repl_buffer
             curr_X = curr_X.to(self.device)
-            curr_target = curr_target.float().to(self.device)
+            if self.out_dim == 1:
+                curr_target = curr_target.float().to(self.device)
+            else:
+                curr_target = curr_target.long().to(self.device)
             curr_loss = self._compute_task_loss(i, curr_X, curr_target)
             # curr_loss *= X.size(0)/float(curr_X.size(0))
             loss += curr_loss
@@ -219,7 +231,7 @@ class FRCL(nn.Module):
         phi = self.base(x)
 
         def loglik(sample):
-            sample = torch.movedim(sample.view(sample.shape[0], self.out_dim, x.shape[0]),
+            sample = moveaxis(sample.view(sample.shape[0], self.out_dim, x.shape[0]),
                                    1, 2)
             if (self.out_dim == 1):
                 sample = sample[:, :, 0]
