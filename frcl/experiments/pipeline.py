@@ -10,6 +10,8 @@ from torch.utils.data import DataLoader
 import abc
 import matplotlib.pyplot as plt
 from IPython.display import clear_output
+from .state import State
+from ..utils import StatCollector
 
 def make_x_y(hist):
     x = np.concatenate([np.linspace(i, i + 1, len(hist[i]), endpoint=False) for i in range(len(hist))])
@@ -52,6 +54,7 @@ class Pipeline(abc.ABC):
         batch_size : int or list of ints : batch size used for training each task
         lr : float or list of floats : learning rate used for training each task
         n_epochs : int or list of ints : count of epochs used for training each task
+        n_classes : int : count of target classes of the tasks
         '''
 
         self.n_classes=n_classes
@@ -64,6 +67,8 @@ class Pipeline(abc.ABC):
         self._make_value_per_task('batch_size', batch_size)
         self._make_value_per_task('lr', lr)
         self._make_value_per_task('n_epochs', n_epochs)
+        self.state = State()
+        self.state.attach_level()
     
     def _before_run(self):
         self._mro_launch('before_run', True)
@@ -195,16 +200,73 @@ class Pipeline(abc.ABC):
             self._after_cl_cycle()
         self._after_run()
         return self._run_return()
+    
+class StatDrawer(Pipeline):
 
-class LossEstPipeline(Pipeline):
+    def clear_output(self):
+        if self.draw_ticket:
+            clear_output(wait=True)
+            self.draw_ticket = False
+
+    def __init__(self, *args, upd_factor=20, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.upd_factor = upd_factor
+    
+    def before_epoch_train(self):
+        self.draw_ticket = True
+
+class FRCLStatsObsPipeline(StatDrawer):
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+    
+    def before_task_train(self):
+        s = State()
+        s.attach_level(
+            e = StatCollector(self.upd_factor), 
+            elbo=StatCollector(self.upd_factor), 
+            kls=[StatCollector(self.upd_factor) for _ in range(1 + self.i_task)], 
+            kls_div_nk=StatCollector(self.upd_factor))
+        self.state.frcl_stat = s
+
+    def after_batch_train(self):
+        frcl_stat = self.state.frcl_stat
+        state = self.state
+        frcl_stat.e.add(state.e)
+        frcl_stat.elbo.add(state.elbo)
+        frcl_stat.kls_div_nk.add(state.kls_div_nk)
+        for i in range(len(frcl_stat.kls)):
+            frcl_stat.kls[i].add(state.kls[i])
+    
+    def after_epoch_train(self):
+        self.clear_output()
+        print("N tasks: {}, Epoch {}".format(self.i_task + 1, self.i_epoch))
+        frcl_stat = self.state.frcl_stat
+        e_hist = frcl_stat.e.get_history()
+        x = np.arange(len(e_hist))
+        fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+        axes[0].plot(x, e_hist, label='e history')
+        elbo_hist = frcl_stat.elbo.get_history()
+        axes[0].plot(x, elbo_hist, label='elbo history')
+        kls_div_nk_hist = frcl_stat.kls_div_nk.get_history()
+        axes[0].plot(x, kls_div_nk_hist, label = 'kls div nk history')
+        axes[0].legend()
+        for i in range(len(frcl_stat.kls)):
+            hist = frcl_stat.kls[i].get_history()
+            axes[1].plot(x, hist, label='kls task {}'.format(i))
+        if len(frcl_stat.kls) > 0:
+            axes[1].legend()
+        plt.show()
+
+
+class LossEstPipeline(StatDrawer):
     '''
     This class hels to trace and 
     visualize loss during training
     '''
 
-    def __init__(self, *args, upd_factor=20, **kwargs):
+    def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.upd_factor = upd_factor
 
     def before_task_train(self):
         self.loss_hist = []
@@ -221,7 +283,7 @@ class LossEstPipeline(Pipeline):
             self.cumm_loss = 0.
     
     def after_epoch_train(self):
-        clear_output(wait=True)
+        self.clear_output()
         x, y = make_x_y(self.loss_hist)
         plt.plot(x, y)
         plt.title('Loss_{}'.format(self.i_task))
@@ -288,9 +350,11 @@ class FRCLPipeline(Pipeline):
     FRCL model
     '''
 
-    def __init__(self, *args, sigma_prior = 1, **kwargs):
+    def __init__(self, *args, sigma_prior = 1, int_compute_method='SVI', N_samples=20, **kwargs):
         super().__init__(*args, **kwargs)
         self.sigma_prior = sigma_prior
+        self.int_compute_method = int_compute_method
+        self.N_samples = N_samples
 
     def create_cl_model(self):
         cl_model = FRCL(
@@ -310,7 +374,16 @@ class FRCLPipeline(Pipeline):
 
     def compute_loss(self):
         return self.cl_model(
-                self.X, self.target, len(self.train_dl) * self.batch_size[self.i_task])
+                self.X, self.target, len(self.train_dl) * self.batch_size[self.i_task], 
+                method = self.int_compute_method, N_samples=self.N_samples)
+
+class FRCLPipelineState(FRCLPipeline):
+
+    def compute_loss(self):
+        return self.cl_model(
+                self.X, self.target, len(self.train_dl) * self.batch_size[self.i_task], 
+                method = self.int_compute_method, N_samples=self.N_samples, state=self.state)
+
 
 class BaselineTrainDemo(BaselinePipeline, AccEstPipeline, LossEstPipeline):
     '''
@@ -326,3 +399,5 @@ class FRCLTrainDemo(FRCLPipeline, AccEstPipeline, LossEstPipeline):
     '''
     pass
 
+class FRCLStatTrace(FRCLPipelineState, AccEstPipeline, FRCLStatsObsPipeline, LossEstPipeline):
+    pass

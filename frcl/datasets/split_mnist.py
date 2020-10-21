@@ -31,9 +31,9 @@ class SplitMnistDataset(Dataset):
 
         for i, data in enumerate(self.full_dataset):
             _, lbl = data
-            if lbl == self.lbl_1:
+            if abs(lbl - self.lbl_1) < 0.1:
                 self.dataset_indices.append(i)
-            if lbl == self.lbl_2:
+            if abs(lbl - self.lbl_2) < 0.1:
                 self.dataset_indices.append(i)
         
         self.transform = torchvision.transforms.ToTensor()

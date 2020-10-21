@@ -225,7 +225,7 @@ class FRCL(nn.Module):
     def __len__(self):
         return len(self.prev_tasks_tensors)
        
-    def forward(self, x, target, N_k, method="SVI", N_samples=20):
+    def forward(self, x, target, N_k, state=None, method="SVI", N_samples=20):
         """
         Return -ELBO
         N_k = len(dataset), required for unbiased estimate through minibatch
@@ -248,7 +248,8 @@ class FRCL(nn.Module):
         mu = self.mu
         cov = [self.L[i] @ self.L[i].T for i in range(len(self.L))]
         means = torch.cat([phi @ mu[i] for i in range(len(mu))], axis=0)
-        variances = torch.cat([torch.diagonal(phi @ cov[i] @ phi.T, 0) for i in range(len(cov))], axis=0) 
+        variances = torch.cat([((phi @ cov[i]) * phi).sum(-1) for i in range(len(cov))], axis = 0)
+        # variances = torch.cat([torch.diagonal(phi @ cov[i] @ phi.T, 0) for i in range(len(cov))], axis=0) 
         
         if (method == "quadrature"):
             assert self.out_dim == 1, "Quadrature is biased for out_dim > 1"
@@ -259,12 +260,16 @@ class FRCL(nn.Module):
                                   torch.randn(means.shape[0]).to(self.device) \
                                   for i in range(N_samples)], axis=0)
             elbo = loglik(samples).mean() 
+        if state is not None:
+            state.e = elbo.item()
+            state.kls = []
             
         kls = 0
         for i in range(self.out_dim):
           #  kls -= kl_divergence(self.w_distr[i], self.w_prior)
             kls -= kl(self.mu[i], self.L[i] @ self.L[i].T,
                       self.w_prior.mean, self.w_prior.covariance_matrix)
+            curr_task_kls = -kls.item()
 
         for i in range(len(self.prev_tasks_distr)):
             phi_i = self.base(self.prev_tasks_tensors[i])
@@ -272,10 +277,18 @@ class FRCL(nn.Module):
            # p_u = MultivariateNormal(torch.zeros(cov_i.shape[0]).to(self.device),
            #                          covariance_matrix=cov_i * self.sigma_prior)
            # kls -= sum([kl_divergence(self.prev_tasks_distr[i][j], p_u) for j in range(self.out_dim)])
-            kls -= sum([kl(self.prev_tasks_distr[i][j].mean, self.prev_tasks_distr[i][j].covariance_matrix,
+            prev_cls = sum([kl(self.prev_tasks_distr[i][j].mean, self.prev_tasks_distr[i][j].covariance_matrix,
                           torch.zeros(cov_i.shape[0]).to(self.device), cov_i * self.sigma_prior) \
                        for j in range(self.out_dim)])
+            if state is not None:
+                state.kls.append(prev_cls.item())
+            kls -= prev_cls
         elbo += kls / N_k
+
+        if state is not None:
+            state.kls.append(curr_task_kls)
+            state.kls_div_nk = kls.item() / N_k
+            state.elbo = elbo.item()
 
         return -elbo
 
