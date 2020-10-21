@@ -31,3 +31,31 @@ class PermutedMnistModel(MnistModel):
 if __name__ == "__main__":
     smm = SplitMnistModel()
     pmm = PermutedMnistModel()
+
+class OmniglotModel(nn.Module):
+
+    @staticmethod
+    def _get_block(in_channels):
+        return nn.Sequential(
+            nn.Conv2d(in_channels, 64, (3, 3), padding=1), 
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.MaxPool2d((2, 2))
+        )
+
+    def __init__(self):
+        super().__init__()
+        self.b1 = self._get_block(1)
+        self.b2 = self._get_block(64)
+        self.b3 = self._get_block(64)
+        self.b4 = self._get_block(64)
+        self.flatten = nn.Flatten()
+        self.hid = 64
+    
+    def forward(self, input):
+        x = self.b1(input)
+        x = self.b2(x)
+        x = self.b3(x)
+        x = self.b4(x)
+        return self.flatten(x)
+

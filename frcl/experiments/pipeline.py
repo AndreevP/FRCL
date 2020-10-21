@@ -12,6 +12,8 @@ import matplotlib.pyplot as plt
 from IPython.display import clear_output
 from .state import State
 from ..utils import StatCollector
+import warnings
+from tqdm import tqdm
 
 def make_x_y(hist):
     x = np.concatenate([np.linspace(i, i + 1, len(hist[i]), endpoint=False) for i in range(len(hist))])
@@ -19,6 +21,9 @@ def make_x_y(hist):
     return x, y
 
 class Pipeline(abc.ABC):
+
+    def get_out_dim(self):
+        return 1 if self.n_classes == 2 else self.n_classes
 
     def _mro_launch(self, name, reverse):
         self_class = self.__class__
@@ -42,7 +47,7 @@ class Pipeline(abc.ABC):
 
     def __init__(self, task_provider, n_inducing=10, 
         inducing_criterion='random', n_repeat=10, device='cuda', 
-        batch_size=32, lr=1e-3, n_epochs=10, n_classes=2):
+        batch_size=32, lr=1e-3, n_epochs=10, n_classes=None):
         '''
         :Parameters:
         task_provider: provider for subsequent tasks, must implement __getitem__, 
@@ -54,11 +59,11 @@ class Pipeline(abc.ABC):
         batch_size : int or list of ints : batch size used for training each task
         lr : float or list of floats : learning rate used for training each task
         n_epochs : int or list of ints : count of epochs used for training each task
-        n_classes : int : count of target classes of the tasks
+        n_classes : int : count of target classes of the tasks (BECOME OBSOLETE NOW)
         '''
-
-        self.n_classes=n_classes
-        self.out_dim = 1 if self.n_classes == 2 else self.n_classes
+        if n_classes is not None:
+            warnings.warn("n_classes option not supported now")
+        # self.out_dim = 1 if self.n_classes == 2 else self.n_classes
         self.task_provider = task_provider
         self.n_inducing = n_inducing
         self.inducing_criterion = inducing_criterion
@@ -167,13 +172,15 @@ class Pipeline(abc.ABC):
         self._before_run()
         for i_repeat in range(self.n_repeat):
             self.i_repeat = i_repeat
+            self.n_classes = self.task_provider[0][-1]
             self.base_model = self.task_provider.model.to(self.device)
             self.cl_model = self.create_cl_model()
 
             self._before_cl_cycle()
             for i_task in range(len(self.task_provider)):
                 self.i_task = i_task
-                train_ds, test_ds = self.task_provider[i_task]
+                train_ds, test_ds, n_classes = self.task_provider[i_task]
+                self.n_classes = n_classes
                 self.train_ds = train_ds
                 self.test_ds = test_ds
                 self.train_dl = DataLoader(
@@ -183,7 +190,10 @@ class Pipeline(abc.ABC):
                 for i_epoch in range(self.n_epochs[self.i_task]):
                     self.i_epoch = i_epoch
                     self._before_epoch_train()
-                    for i_batch, batch in enumerate(self.train_dl):
+                    for i_batch, batch in tqdm(
+                            enumerate(self.train_dl), 
+                            total=len(self.train_dl), 
+                            desc="Task: {}; Epoch: {}".format(self.i_task, self.i_epoch)):
                         self.i_batch = i_batch
                         self.optim.zero_grad()
                         self.X = batch[0]
@@ -324,12 +334,15 @@ class BaselinePipeline(Pipeline):
         super().__init__(*args, **kwargs)
 
     def create_cl_model(self):
+        multiclass = True
+        if self.n_classes == 2:
+            multiclass = False
         cl_model = DeterministicCLBaseline(
-            self.base_model, self.base_model.hid, out_dim=self.out_dim, device=self.device)
+            self.base_model, self.base_model.hid, device=self.device, multiclass=multiclass)
         return cl_model
 
     def before_task_train(self):
-        self.cl_model.create_new_task()
+        self.cl_model.create_new_task(self.get_out_dim())
     
     def before_batch_train(self):
         if self.n_classes == 2:
@@ -351,16 +364,27 @@ class FRCLPipeline(Pipeline):
     '''
 
     def __init__(self, *args, sigma_prior = 1, int_compute_method='SVI', N_samples=20, **kwargs):
+        '''
+        :Parameters:
+        int_compute_method: str: method to comute expectation
+        N_samples : int : count of points to estimate expectation
+        '''
         super().__init__(*args, **kwargs)
         self.sigma_prior = sigma_prior
         self.int_compute_method = int_compute_method
         self.N_samples = N_samples
 
     def create_cl_model(self):
+        multiclass = True
+        if self.n_classes == 2:
+            multiclass = False
         cl_model = FRCL(
             self.base_model, self.base_model.hid, 
-            self.device, sigma_prior=self.sigma_prior, out_dim = self.out_dim)
+            self.device, sigma_prior=self.sigma_prior, multiclass=multiclass)
         return cl_model
+    
+    def before_task_train(self):
+        self.cl_model.create_new_task(self.get_out_dim())
 
     def before_batch_train(self):
         if self.n_classes == 2:

@@ -1,7 +1,9 @@
 import abc
-from .models import SplitMnistModel, PermutedMnistModel
+from .models import SplitMnistModel, PermutedMnistModel, OmniglotModel
 from .datasets.split_mnist import SplitMnistDataset
 from .datasets.permuted_mnist import RandomShufflePermutation, PermutedMnistDataset
+from .datasets.omniglot import OmniglotOneAlphabetDataset
+from .utils import ScaleDataset
 import numpy as np
 
 class Task(abc.ABC):
@@ -27,15 +29,18 @@ class SplitMnistTask(Task):
     def model(self):
         return SplitMnistModel()
 
-    def __init__(self):
+    def __init__(self, return_n_classes=True):
         super().__init__()
+        self.return_n_classes = return_n_classes
         self.tasks = [(0, 1), (2, 3), (4 ,5), (6, 7), (8, 9)]
     
     def __getitem__(self, i):
         lbl_0, lbl_1 = self.tasks[i]
         train_ds = SplitMnistDataset(lbl_0, lbl_1, normalize=True)
         test_ds = SplitMnistDataset(lbl_0, lbl_1, train=False, normalize=True)
-        return train_ds, test_ds
+        if not self.return_n_classes:
+            return train_ds, test_ds
+        return train_ds, test_ds, 2
     
     def __len__(self):
         return len(self.tasks)
@@ -55,8 +60,9 @@ class PermutedMnistTask(Task):
     def model(self):
         return PermutedMnistModel()
     
-    def __init__(self, n_tasks, seed=None):
+    def __init__(self, n_tasks, seed=None, return_n_classes=True):
         super().__init__()
+        self.return_n_classes=return_n_classes
         self.n_tasks = n_tasks
         self.permutations = []
         if seed is None or isinstance(seed, int):
@@ -77,8 +83,57 @@ class PermutedMnistTask(Task):
         permutation = self.permutations[i]
         train_ds = PermutedMnistDataset(permutation, normalize=True)
         test_ds = PermutedMnistDataset(permutation, train=False, normalize=True)
-        return train_ds, test_ds
+        if not self.return_n_classes:
+            return train_ds, test_ds
+        return train_ds, test_ds, 10
     
     def __len__(self):
         return self.n_tasks
+
+class OmniglotTask(Task):
+
+    @property
+    def model(self):
+        return OmniglotModel()
+    
+    def __init__(self, task_indices=None, n_tasks=None, return_n_classes=True, n_scale=20):
+        '''
+        :Parameters:
+        task_indices : list : numbers of tasks to use
+        n_tasks : int : count of first tasks to use
+        return_n_classes: bool : should task return n_classes for each task
+        n_scale : int : parameter to scale dataset (for comfortable learning)
+        '''
+        super().__init__()
+        self.return_n_classes = return_n_classes
+        if task_indices is not None and n_tasks is not None:
+            raise Exception("only one parameter of 'task_indices' and 'n_tasks'"
+                " can be initialized")
+        self.task_indices = list(range(50))
+        if task_indices is not None:
+            for i in task_indices:
+                assert 0 <= i and i < 50 , 'task numbers must be in [0, 50)'
+            self.task_indices = task_indices
+        if n_tasks is not None:
+            self.task_indices = list(range(n_tasks))
+        self.alphabets = OmniglotOneAlphabetDataset.alphabets
+        self.n_scale = n_scale
+        self.lazy_datasets = {}
+    
+    def __len__(self):
+        return len(self.task_indices)
+    
+    def __getitem__(self, i):
+        i_task = self.task_indices[i]
+        i_alph = self.alphabets[i_task]
+        if i_alph in self.lazy_datasets.keys():
+            train_ds, test_ds = self.lazy_datasets[i_alph]
+        else:
+            train_ds = ScaleDataset(OmniglotOneAlphabetDataset(i_alph), self.n_scale)
+            test_ds = ScaleDataset(OmniglotOneAlphabetDataset(i_alph, train=False), self.n_scale)
+            self.lazy_datasets[i_alph] = (train_ds, test_ds)
+        n_classes = train_ds.dataset.n_classes
+        if not self.return_n_classes:
+            return train_ds, test_ds
+        return train_ds, test_ds, n_classes
 

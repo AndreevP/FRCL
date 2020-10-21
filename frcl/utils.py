@@ -1,5 +1,6 @@
 import torch
 from torch.utils.data import DataLoader
+from torch.utils.data import Dataset
 import abc
 
 class CLBaseEpochQualifier:
@@ -125,3 +126,18 @@ class StatCollector:
             if self.collected >= incomplete_limit:
                 history.append(self.current/self.collected)
         return history
+
+class ScaleDataset(Dataset):
+
+    def __init__(self, dataset, n_scale):
+        self.n_scale = n_scale
+        self.dataset = dataset
+    
+    def __len__(self):
+        return len(self.dataset) * self.n_scale
+    
+    def __getitem__(self, i):
+        if i >= len(self):
+            raise IndexError("dataset index out of range")
+        i = i % len(self.dataset)
+        return self.dataset[i]
