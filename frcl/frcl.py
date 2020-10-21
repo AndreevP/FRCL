@@ -183,12 +183,17 @@ class StochasticCLBaseline(CLBaseline):
     def create_replay_buffer(self, dataset):
         self.tasks_replay_buffers.append(dataset)
 
-
+def kl(m1, S1, m2, S2):
+    S2_ = torch.inverse(S2)
+    return 0.5 * (torch.trace(S2_ @ S1) + (m2 - m1).T @ S2_ @ (m2 - m1) \
+                  - S1.shape[0] + torch.logdet(S2) - torch.logdet(S1))
+        
 class FRCL(nn.Module):
     def __init__(self, base_model, h_dim, device, sigma_prior=1, out_dim=1):
         super(FRCL, self).__init__()
         
         self.out_dim = out_dim
+        self.h_dim = h_dim
         self.sigma_prior = sigma_prior
         self.device = device
         self.w_prior = MultivariateNormal(torch.zeros(h_dim).to(device),
@@ -257,14 +262,19 @@ class FRCL(nn.Module):
             
         kls = 0
         for i in range(self.out_dim):
-            kls -= kl_divergence(self.w_distr[i], self.w_prior)
+          #  kls -= kl_divergence(self.w_distr[i], self.w_prior)
+            kls -= kl(self.mu[i], self.L[i] @ self.L[i].T,
+                      self.w_prior.mean, self.w_prior.covariance_matrix)
 
         for i in range(len(self.prev_tasks_distr)):
             phi_i = self.base(self.prev_tasks_tensors[i])
-            cov_i = phi_i @ phi_i.T
-            p_u = MultivariateNormal(torch.zeros(cov_i.shape[0]).to(self.device),
-                                     covariance_matrix=cov_i)#cov_i * self.sigma_prior)
-            kls -= sum([kl_divergence(self.prev_tasks_distr[i][j], p_u) for j in range(self.out_dim)])
+            cov_i = phi_i @ phi_i.T + torch.eye(phi_i.shape[0]).to(self.device) * 1e-6
+           # p_u = MultivariateNormal(torch.zeros(cov_i.shape[0]).to(self.device),
+           #                          covariance_matrix=cov_i * self.sigma_prior)
+           # kls -= sum([kl_divergence(self.prev_tasks_distr[i][j], p_u) for j in range(self.out_dim)])
+            kls -= sum([kl(self.prev_tasks_distr[i][j].mean, self.prev_tasks_distr[i][j].covariance_matrix,
+                          torch.zeros(cov_i.shape[0]).to(self.device), cov_i * self.sigma_prior) \
+                       for j in range(self.out_dim)])
         elbo += kls / N_k
 
         return -elbo
@@ -279,16 +289,19 @@ class FRCL(nn.Module):
         """
         phi_x = self.base(x)
         phi_z = self.base(self.prev_tasks_tensors[k])
-        k_xx = phi_x @ phi_x.T
-        k_xz = phi_x @ phi_z.T
-        k_zz = phi_z @ phi_z.T
+        k_xx = phi_x @ phi_x.T * self.sigma_prior
+        k_xz = phi_x @ phi_z.T * self.sigma_prior
+        k_zz = phi_z @ phi_z.T * self.sigma_prior
         k_zz_ = torch.inverse(k_zz)
         mu_u = [self.prev_tasks_distr[k][i].mean for i in range(self.out_dim)]
         cov_u = [self.prev_tasks_distr[k][i].covariance_matrix for i in range(self.out_dim)]
 
         mu = [phi_x @ phi_z.T @ k_zz_ @  mu_u[i] for i in range(self.out_dim)]
         sigma = [k_xx + k_xz @ k_zz_ @ (cov_u[i]  - k_zz) @ k_zz_ @ k_xz.T for i in range(self.out_dim)]
-        sigma = [sigma[i] * torch.eye(sigma[i].shape[0]).to(self.device) for i in range(self.out_dim)] 
+        sigma = [sigma[i] * torch.eye(sigma[i].shape[0]).to(self.device)+\
+                 torch.eye(sigma[i].shape[0]).to(self.device) * 1e-6\
+                 for i in range(self.out_dim)] 
+      #  print([s.min() for s in sigma])
                                                              #we are interested only 
                                                              #in diagonal part for inference ?
         return [MultivariateNormal(loc=mu[i], covariance_matrix=sigma[i]) for i in range(self.out_dim)]
@@ -320,10 +333,17 @@ class FRCL(nn.Module):
             mu_u = [phi @ self.mu[i] for i in range(self.out_dim)]
             L_u = [phi @ self.L[i] for i in range(self.out_dim)]
             cov = [L_u[i] @ L_u[i].T for i in range(self.out_dim)]
+            #regularization
+            cov = [cov[i] + torch.eye(cov[i].shape[0]).to(self.device) * 1e-6 for i in range(self.out_dim)]
             self.prev_tasks_distr.append([MultivariateNormal(loc=mu_u[i],
                                          covariance_matrix=cov[i]) for i in range(self.out_dim)])
             self.prev_tasks_tensors.append(X)
-            return
+        
+        self.L = [Parameter(torch.eye(self.h_dim), requires_grad=True).to(self.device) \
+                  for _ in range(self.out_dim)] 
+        self.mu = [Parameter(torch.normal(0, 0.1, size=(self.h_dim,)), requires_grad=True).to(self.device)\
+                   for _ in range(self.out_dim)]        
+        return
             
                 
     @torch.no_grad()
