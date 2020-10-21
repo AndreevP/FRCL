@@ -4,11 +4,19 @@ from torch.nn import ParameterList, Parameter
 import torch.nn.functional as F
 from torch.utils.data import Subset, DataLoader
 from torch.distributions.multivariate_normal import MultivariateNormal
-from .quadrature import GaussHermiteQuadrature1D
+from frcl.quadrature import GaussHermiteQuadrature1D
 from torch.distributions.kl import kl_divergence
 from copy import copy
-from scipy.stats import ttest_ind
 import abc
+
+def moveaxis(tensor: torch.Tensor, source: int, destination: int) -> torch.Tensor:
+    dim = tensor.dim()
+    perm = list(range(dim))
+    if destination < 0:
+        destination += dim
+    perm.pop(source)
+    perm.insert(destination, source)
+    return tensor.permute(*perm)
 
 
 def create_torch_random_gen(value):
@@ -84,7 +92,7 @@ class CLBaseline(nn.Module, abc.ABC):
         classes: list: list of target classes
         '''
         w = Parameter(torch.randn(
-            (self.out_dim, self.h_dim), generator=self.torch_gen)).to(self.device)
+            (self.out_dim, self.h_dim), generator=self.torch_gen).to(self.device))
         self.tasks_omegas.append(w)
     
     def _compute_task_loss(self, k, X, target):
@@ -101,6 +109,7 @@ class CLBaseline(nn.Module, abc.ABC):
         get_class: bool: if False, returns the predictive probability
         distribution over the classes, othervise returns the predicted class
         '''
+        x = x.to(self.device)
         assert(k >= 0)
         assert(k < len(self.tasks_omegas))
         omega = self.tasks_omegas[k]
@@ -138,6 +147,11 @@ class DeterministicCLBaseline(CLBaseline):
         loss = self._compute_task_loss(-1, X, target)
         for i, repl_buffer in enumerate(self.tasks_replay_buffers):
             curr_X, curr_target = repl_buffer
+            curr_X = curr_X.to(self.device)
+            if self.out_dim == 1:
+                curr_target = curr_target.float().to(self.device)
+            else:
+                curr_target = curr_target.long().to(self.device)
             curr_loss = self._compute_task_loss(i, curr_X, curr_target)
             # curr_loss *= X.size(0)/float(curr_X.size(0))
             loss += curr_loss
@@ -170,57 +184,118 @@ class StochasticCLBaseline(CLBaseline):
     def create_replay_buffer(self, dataset):
         self.tasks_replay_buffers.append(dataset)
 
-
+def kl(m1, S1, m2, S2):
+    S2_ = torch.inverse(S2)
+    return 0.5 * (torch.trace(S2_ @ S1) + (m2 - m1).T @ S2_ @ (m2 - m1) \
+                  - S1.shape[0] + torch.logdet(S2) - torch.logdet(S1))
+        
 class FRCL(nn.Module):
-    def __init__(self, base_model, h_dim, device, sigma_prior=1):
+    def __init__(self, base_model, h_dim, device, sigma_prior=1, out_dim=1):
         super(FRCL, self).__init__()
-        self.device = device
+        
+        self.out_dim = out_dim
         self.h_dim = h_dim
-        self.base = base_model.to(device)
         self.sigma_prior = sigma_prior
-        self.L = Parameter(torch.eye(h_dim), requires_grad=True).to(device)
-        self.mu = Parameter(torch.normal(0, 0.1, size=(h_dim,)), requires_grad=True).to(device)
-        self.w_distr = MultivariateNormal(self.mu, scale_tril=self.L)
+        self.device = device
         self.w_prior = MultivariateNormal(torch.zeros(h_dim).to(device),
-                                          covariance_matrix=sigma_prior*torch.eye(h_dim).to(device))
-        self.quadr = GaussHermiteQuadrature1D().to(device)
+                                          covariance_matrix=sigma_prior*torch.eye(h_dim).to(device)) 
         self.prev_tasks_distr = [] #previous tasks as torch distributions
         self.prev_tasks_tensors = [] #previous tasks as torch tensors
+        self.quadr = GaussHermiteQuadrature1D().to(device)
+        self.base = base_model.to(device)
+        
+        if out_dim == 1:
+            # computes loss
+            self.loss_func = nn.BCEWithLogitsLoss(reduction='none')
+
+            # predicts distribution over the classes
+            def pred_func(input):
+                pred = F.sigmoid(input)
+                return torch.stack([1. - pred, pred], dim=-1).squeeze()
+            self.pred_func = pred_func
+           
+        if out_dim > 1:
+            self.loss_func = nn.CrossEntropyLoss(reduction='none')
+            self.pred_func = nn.Softmax()    
+            
+        self.L = [Parameter(torch.eye(h_dim), requires_grad=True).to(device) for _ in range(out_dim)] 
+        self.mu = [Parameter(torch.normal(0, 0.1, size=(h_dim,)), requires_grad=True).to(device) for _ in range(out_dim)]
+        self.w_distr = [MultivariateNormal(self.mu[i], scale_tril=self.L[i]) for i in range(out_dim)] 
+            
     
     def __len__(self):
         return len(self.prev_tasks_tensors)
        
-    def forward(self, x, target, N_k):
+    def forward(self, x, target, N_k, state=None, method="SVI", N_samples=20):
         """
         Return -ELBO
         N_k = len(dataset), required for unbiased estimate through minibatch
         """
+        assert method in ["SVI", "quadrature"]
+        
         elbo = 0
         phi = self.base(x)
-        def loglik(sample): #currently hardcoded for binary classification
-            return -torch.log(1 + torch.exp(-target * sample))
+
+        def loglik(sample):
+            sample = moveaxis(sample.view(sample.shape[0], self.out_dim, x.shape[0]),
+                                   1, 2)
+            if (self.out_dim == 1):
+                sample = sample[:, :, 0]
+                tar = target.float()
+            else:
+                tar = target.long()
+            return torch.stack([-self.loss_func(sample[i], tar) for i in range(sample.shape[0])], axis=0)
+
         mu = self.mu
-        cov = self.L @ self.L.T
-        means = phi @ mu
-        variances = torch.diagonal(phi @ cov @ phi.T, 0)
-        elbo += (self.quadr(loglik, means, variances)).sum()
-        elbo /= x.shape[0] #mean
+        cov = [self.L[i] @ self.L[i].T for i in range(len(self.L))]
+        means = torch.cat([phi @ mu[i] for i in range(len(mu))], axis=0)
+        variances = torch.cat([((phi @ cov[i]) * phi).sum(-1) for i in range(len(cov))], axis = 0)
+        # variances = torch.cat([torch.diagonal(phi @ cov[i] @ phi.T, 0) for i in range(len(cov))], axis=0) 
         
+        if (method == "quadrature"):
+            assert self.out_dim == 1, "Quadrature is biased for out_dim > 1"
+            elbo += (self.quadr(loglik, means, variances)).sum()
+            elbo /= x.shape[0] #mean
+        else:
+            samples = torch.stack([means + torch.sqrt(variances) * \
+                                  torch.randn(means.shape[0]).to(self.device) \
+                                  for i in range(N_samples)], axis=0)
+            elbo = loglik(samples).mean() 
+        if state is not None:
+            state.e = elbo.item()
+            state.kls = []
+            
         kls = 0
-        kls -= kl_divergence(self.w_distr, self.w_prior)
+        for i in range(self.out_dim):
+          #  kls -= kl_divergence(self.w_distr[i], self.w_prior)
+            kls -= kl(self.mu[i], self.L[i] @ self.L[i].T,
+                      self.w_prior.mean, self.w_prior.covariance_matrix)
+            curr_task_kls = -kls.item()
 
         for i in range(len(self.prev_tasks_distr)):
             phi_i = self.base(self.prev_tasks_tensors[i])
-            cov_i = phi_i @ phi_i.T
-            p_u = MultivariateNormal(torch.zeros(cov_i.shape[0]).to(self.device),
-                                     covariance_matrix=cov_i)#cov_i * self.sigma_prior)
-            kls -= kl_divergence(self.prev_tasks_distr[i], p_u)
+            cov_i = phi_i @ phi_i.T + torch.eye(phi_i.shape[0]).to(self.device) * 1e-6
+           # p_u = MultivariateNormal(torch.zeros(cov_i.shape[0]).to(self.device),
+           #                          covariance_matrix=cov_i * self.sigma_prior)
+           # kls -= sum([kl_divergence(self.prev_tasks_distr[i][j], p_u) for j in range(self.out_dim)])
+            prev_cls = sum([kl(self.prev_tasks_distr[i][j].mean, self.prev_tasks_distr[i][j].covariance_matrix,
+                          torch.zeros(cov_i.shape[0]).to(self.device), cov_i * self.sigma_prior) \
+                       for j in range(self.out_dim)])
+            if state is not None:
+                state.kls.append(prev_cls.item())
+            kls -= prev_cls
         elbo += kls / N_k
 
-        return -elbo 
+        if state is not None:
+            state.kls.append(curr_task_kls)
+            state.kls_div_nk = kls.item() / N_k
+            state.elbo = elbo.item()
+
+        return -elbo
+
 
     @torch.no_grad()
-    def get_predictive(self, x, k, return_distr=True):
+    def get_predictive(self, x, k):
         """ Computes predictive distribution according to section 2.5
             x - batch of data
             k - index of task
@@ -228,67 +303,86 @@ class FRCL(nn.Module):
         """
         phi_x = self.base(x)
         phi_z = self.base(self.prev_tasks_tensors[k])
-        k_xx = phi_x @ phi_x.T
-        k_xz = phi_x @ phi_z.T
-        k_zz = phi_z @ phi_z.T
+        k_xx = phi_x @ phi_x.T * self.sigma_prior
+        k_xz = phi_x @ phi_z.T * self.sigma_prior
+        k_zz = phi_z @ phi_z.T * self.sigma_prior + torch.eye(phi_z.shape[0]).to(self.device) * 1e-4
         k_zz_ = torch.inverse(k_zz)
-        mu_u = self.prev_tasks_distr[k].mean
-        cov_u = self.prev_tasks_distr[k].covariance_matrix
+        mu_u = [self.prev_tasks_distr[k][i].mean for i in range(self.out_dim)]
+        cov_u = [self.prev_tasks_distr[k][i].covariance_matrix for i in range(self.out_dim)]
 
-        mu = phi_x @ phi_z.T @ k_zz_ @  mu_u
-        sigma = k_xx + k_xz @ k_zz_ @ (cov_u  - k_zz) @ k_zz_ @ k_xz.T
-        sigma *= torch.eye(sigma.shape[0]).to(self.device) #we are interested only 
-                                                           #in diagonal part for inference
-        return MultivariateNormal(loc=mu, covariance_matrix=sigma) if return_distr else (mu, sigma)
+        mu = [phi_x @ phi_z.T @ k_zz_ @  mu_u[i] for i in range(self.out_dim)]
+        sigma = [k_xx + k_xz @ k_zz_ @ (cov_u[i]  - k_zz) @ k_zz_ @ k_xz.T for i in range(self.out_dim)]
+        sigma = [sigma[i] * torch.eye(sigma[i].shape[0]).to(self.device)+\
+                 torch.eye(sigma[i].shape[0]).to(self.device) * 1e-6\
+                 for i in range(self.out_dim)] 
+      #  print([s.min() for s in sigma])
+        sigma = [torch.clamp(sigma[i], min=0, max=100.)+\
+                 torch.eye(sigma[i].shape[0]).to(self.device) * 1e-3\
+                 for i in range(self.out_dim)]    
+                                                             #we are interested only 
+                                                             #in diagonal part for inference 
+        return [MultivariateNormal(loc=mu[i], covariance_matrix=sigma[i]) for i in range(self.out_dim)]
 
     @torch.no_grad()
     def predict(self, x, k, MC_samples=20):
         """Compute p(y) by MC estimate from q_\theta(f)?
         """
         distr = self.get_predictive(x.to(self.device), k)
-
-        def likelihood(y): #currently hardcoded for binary classification
-            return 1./ (1 + torch.exp(-y))
-
         predicted = 0
         for i in range(MC_samples):
-            sample = distr.sample()
-            predicted += likelihood(sample)
+            sample = [distr[i].sample() for i in range(self.out_dim)]
+            predicted += self.pred_func(torch.stack(sample, axis=1))
         predicted /= MC_samples
         return predicted
 
     @torch.no_grad()
     def select_inducing(self, task_dataloader, N=100, criterion="random"):
-        """Given task dataloader compute N inducing points
-           Updates self.prev_tasks_distr and self.prev_tasks_tensors
+        """
+        Given task dataloader compute N inducing points
+        Updates self.prev_tasks_distr and self.prev_tasks_tensors
         """
         
         if (criterion=="random"):
-            random_points = torch.utils.data.DataLoader(task_dataloader.dataset,
+            smp = torch.utils.data.DataLoader(task_dataloader.dataset,
                                               batch_size=N,
                                               shuffle=True)
-            Z, _ = next(iter(random_points))
+            Z, y = next(iter(smp))
             Z = Z.to(self.device)
 
         if (criterion=="deterministic"):
 
-            def calculate_induce_quality_statistic(all_points, inducing):
-                """calculates trace statistic of inducing cquality"""
-                phi_x = self.base(all_points)
-                phi_z = self.base(inducing)
-                k_xx = phi_x @ phi_x.T
-                k_xz = phi_x @ phi_z.T
+            def calculate_induce_quality_statistic(inducing_points):
+                """
+                Calculates trace statistic of inducing cquality 
+                (up to multiplication by prior variance)
+                """
+                statistic = 0
+                
+                loader_for_batch_computation = torch.utils.data.DataLoader(
+                                              task_dataloader.dataset,
+                                              batch_size=2000,
+                                              shuffle=False)
+                
+                phi_z = self.base(inducing_points.to(device))
                 k_zz = phi_z @ phi_z.T
-                return torch.trace(k_xx - k_xz @ torch.inverse(k_zz) @ k_xz.T)
+                inv_k_zz = torch.inverse(k_zz +\
+                 torch.eye(k_zz.shape[0]).to(self.device) * 1e-3)
+                for x_batch, _ in loader_for_batch_computation:
+                    phi_x = self.base(x_batch.to(device))
+                    k_xz = phi_x @ phi_z.T
+                    k_xx = phi_x @ phi_x.T
+                    statistic += torch.trace(k_xx - k_xz @ inv_k_zz @ k_xz.T)
+                return statistic
             
             def find_best_inducing_points(start_inducing_set="random",
                                           task_dataloader=task_dataloader, 
-                                          max_iter=1000, return_statistic=False):
+                                          max_iter=300, 
+                                          early_stop_num_iter=60,
+                                          verbose=True):
                 
                 """Sequentially adds a new point instead of a random one in
                 the initial set of inducing points, if the value of the statstic
-                above lessens and does not do anything otherwise.
-
+                above lessens, and does not do anything otherwise.
                 - start_inducing_set: list of points to start from
                 - max_iter: maximum number of tries to add a point
                 """
@@ -296,7 +390,7 @@ class FRCL(nn.Module):
                 if start_inducing_set == "random":
                     random_points = torch.utils.data.DataLoader(task_dataloader.dataset,
                                               batch_size=N,
-                                              shuffle=False)
+                                              shuffle=True)
                     Z, _ = next(iter(random_points))
                     Z = Z.to(self.device)
                 else:
@@ -304,31 +398,50 @@ class FRCL(nn.Module):
                     assert isinstance(start_inducing_set[0], torch.Tensor)
                     Z = start_inducing_set.to(self.device)
                  
-                all_points = [elem[0] for elem in task_dataloader.dataset]
+
+                potential_points, _ = next(iter(torch.utils.data.DataLoader(
+                                      task_dataloader.dataset,
+                                      batch_size=max_iter,
+                                      shuffle=True)))
                 
-                potential_points = torch.utils.data.DataLoader(task_dataloader.dataset,
-                                              batch_size=max_iter,
-                                              shuffle=True)
-                
-                for point, _ in potential_points:
-                    Z_new = Z.copy()
-                    Z_new[np.random.randint(0, N - 1)] = point
-                    T = calculate_induce_quality_statistic(all_points, Z)
-                    T_new = calculate_induce_quality_statistic(all_points, Z_new)
+                T = calculate_induce_quality_statistic(Z)
+                new_point_counter = 0
+                early_stop_counter = 0
+                for i, point in enumerate(potential_points):
+                    Z_new = copy(Z)
+                    Z_new[np.random.randint(0, N)] = point
+                    T_new = calculate_induce_quality_statistic(Z_new)
                     if T_new < T:
-                        Z = Z_new
-                
-                return Z, min(T, T_new) if return_statistic else Z
+                        T, Z = T_new, Z_new
+                        new_point_counter += 1
+                        early_stop_counter = 0
+                    else:
+                         early_stop_counter += 1
+                    if verbose and i % 10 == 0:
+                       print("Iteration {} out of {} is in progress".
+                             format(i, max_iter))
+                       print("Current best statistic is ", round(T.item(), 3))
+                       print("New points added ", new_point_counter, '\n')
+                    if early_stop_counter == early_stop_num_iter:
+                        print("Early stop activated!")
+                        break
+                return Z
             
             Z = find_best_inducing_points()
-        
+
         phi = self.base(Z)
-        mu_u = phi @ self.mu
-        L_u = phi @ self.L
-        cov = L_u @ L_u.T
-        self.prev_tasks_distr.append(MultivariateNormal(loc=mu_u,
-                                                        covariance_matrix=cov))
+        mu_u = [phi @ self.mu[i] for i in range(self.out_dim)]
+        L_u = [phi @ self.L[i] for i in range(self.out_dim)]
+        cov = [L_u[i] @ L_u[i].T for i in range(self.out_dim)]
+        #regularization
+        cov = [cov[i] + torch.eye(cov[i].shape[0]).to(self.device) * 1e-6 for i in range(self.out_dim)]
+        self.prev_tasks_distr.append([MultivariateNormal(loc=mu_u[i],
+                                    covariance_matrix=cov[i]) for i in range(self.out_dim)])
         self.prev_tasks_tensors.append(Z)
+        self.L = [Parameter(torch.eye(self.h_dim), requires_grad=True).to(self.device) \
+                  for _ in range(self.out_dim)] 
+        self.mu = [Parameter(torch.normal(0, 0.1, size=(self.h_dim,)), requires_grad=True).to(self.device)\
+                   for _ in range(self.out_dim)] 
         return
             
                 
@@ -347,13 +460,16 @@ class FRCL(nn.Module):
                (p_mu - q_mu).T @ (inv_p_var + inv_q_var) @ (p_mu - q_mu)) / 4
         
         phi_x = self.base(x)
-        p_vars = torch.diagonal(phi_x @ phi_x.T, 0)
-        p_mus = torch.zeros(len(l_old))
-        q_mus, q_covar_matrix = self.get_predictive(x, -1, return_distr=False)
-        q_vars = torch.diagonal(q_covar_matrix, 0)
-        l_new = torch.Tensor([gaus_sym_kl(p_mus[i], p_vars[i], q_mus[i], q_vars[i]) for i in range(len(l_old))])
+        p_covar = self.sigma_prior ** 2 * phi_x @ phi_x.T + 1e-6 * torch.eye(phi_x.shape[0])
+        p_mu = torch.zeros(len(l_old))
+        q_dists = self.get_predictive(x, -1, return_distr=False)
+        q_mus, q_covars = zip(*[(dist.mean, dist.covariance_matrix) for dist in q_dists])
+        l_new = torch.Tensor([gaus_sym_kl(p_mu, p_covar, q_mus[i], q_covars[i], 
+                                          dim=self.out_dim) 
+                                          for i in range(len(l_old))])
         t, p_value = ttest_indest_ind(l_old, l_new, equal_var=False)    
         return l_new, t, p if return_p_value else l_new, t
     
+
 if __name__ == "__main__":
     clb = CLBaseline(None, None)
