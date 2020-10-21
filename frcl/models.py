@@ -25,7 +25,7 @@ class SplitMnistModel(MnistModel):
 
 class PermutedMnistModel(MnistModel):
 
-    def __init__(self, hid=200):
+    def __init__(self, hid=100):
         super().__init__(hid)
 
 if __name__ == "__main__":
