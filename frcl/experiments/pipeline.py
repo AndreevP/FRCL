@@ -203,6 +203,8 @@ class Pipeline(abc.ABC):
                         self.target = self.target.to(self.device)
                         self.loss = self.compute_loss()
                         self.loss.backward()
+                       # clipping_value = 1e-6 # arbitrary value of your choosing
+                       # torch.nn.utils.clip_grad_norm_(self.cl_model.parameters(), clipping_value)
                         self._after_batch_train()
                         self.optim.step()
                     self._after_epoch_train()

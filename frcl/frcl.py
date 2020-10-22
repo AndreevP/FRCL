@@ -204,6 +204,8 @@ class StochasticCLBaseline(CLBaseline):
         self.tasks_replay_buffers.append(dataset)
 
 def kl(m1, S1, m2, S2):
+    S2 = S2 + torch.eye(S2.shape[0]).to(S2) * 1e-3
+    S1 = S1 + torch.eye(S1.shape[0]).to(S1) * 1e-3
     S2_ = torch.inverse(S2)
     return 0.5 * (torch.trace(S2_ @ S1) + (m2 - m1).T @ S2_ @ (m2 - m1) \
                   - S1.shape[0] + torch.logdet(S2) - torch.logdet(S1))
@@ -256,7 +258,7 @@ class FRCL(nn.Module):
     def __len__(self):
         return len(self.prev_tasks_tensors)
        
-    def forward(self, x, target, N_k, state=None, method="SVI", N_samples=20):
+    def forward(self, x, target, N_k, state=None, method="SVI", N_samples=100):
         """
         Return -ELBO
         N_k = len(dataset), required for unbiased estimate through minibatch
@@ -279,15 +281,16 @@ class FRCL(nn.Module):
         mu = self.mu
         cov = [self.L[i] @ self.L[i].T for i in range(len(self.L))]
         means = torch.cat([phi @ mu[i] for i in range(len(mu))], axis=0)
-        variances = torch.cat([((phi @ cov[i]) * phi).sum(-1) for i in range(len(cov))], axis = 0)
-        # variances = torch.cat([torch.diagonal(phi @ cov[i] @ phi.T, 0) for i in range(len(cov))], axis=0) 
-        
+      #  variances = torch.cat([((phi @ cov[i]) * phi).sum(-1) for i in range(len(cov))], axis = 0)
+        variances = torch.cat([torch.diagonal(phi @ cov[i] @ phi.T, 0) for i in range(len(cov))], axis=0) 
+     #   print(means.shape[0])
+     #   print(variances)
         if (method == "quadrature"):
             assert self.out_dim == 1, "Quadrature is biased for out_dim > 1"
             elbo += (self.quadr(loglik, means, variances)).sum()
             elbo /= x.shape[0] #mean
         else:
-            samples = torch.stack([means + torch.sqrt(variances) * \
+            samples = torch.stack([means + torch.sqrt(variances + 1e-6) * \
                                   torch.randn(means.shape[0]).to(self.device) \
                                   for i in range(N_samples)], axis=0)
             elbo = loglik(samples).mean() 
@@ -297,7 +300,7 @@ class FRCL(nn.Module):
             
         kls = 0
         for i in range(self.out_dim):
-          #  kls -= kl_divergence(self.w_distr[i], self.w_prior)
+           # kls -= kl_divergence(self.w_distr[i], self.w_prior)
             kls -= kl(self.mu[i], self.L[i] @ self.L[i].T,
                       self.w_prior.mean, self.w_prior.covariance_matrix)
             curr_task_kls = -kls.item()
@@ -305,7 +308,7 @@ class FRCL(nn.Module):
         for i in range(len(self.prev_tasks_distr)):
             out_dim = self.out_dims[i]
             phi_i = self.base(self.prev_tasks_tensors[i])
-            cov_i = phi_i @ phi_i.T + torch.eye(phi_i.shape[0]).to(self.device) * 1e-6
+            cov_i = phi_i @ phi_i.T + torch.eye(phi_i.shape[0]).to(self.device) * 1e-3
            # p_u = MultivariateNormal(torch.zeros(cov_i.shape[0]).to(self.device),
            #                          covariance_matrix=cov_i * self.sigma_prior)
            # kls -= sum([kl_divergence(self.prev_tasks_distr[i][j], p_u) for j in range(self.out_dim)])
@@ -469,7 +472,7 @@ class FRCL(nn.Module):
         L_u = [phi @ self.L[i] for i in range(self.out_dim)]
         cov = [L_u[i] @ L_u[i].T for i in range(self.out_dim)]
         #regularization
-        cov = [cov[i] + torch.eye(cov[i].shape[0]).to(self.device) * 1e-6 for i in range(self.out_dim)]
+        cov = [cov[i] + torch.eye(cov[i].shape[0]).to(self.device) * 1e-4 for i in range(self.out_dim)]
         self.prev_tasks_distr.append([MultivariateNormal(loc=mu_u[i],
                                     covariance_matrix=cov[i]) for i in range(self.out_dim)])
         self.prev_tasks_tensors.append(Z)
