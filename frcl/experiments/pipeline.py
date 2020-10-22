@@ -296,10 +296,10 @@ class LossEstPipeline(StatDrawer):
         self.clear_output()
         x, y = make_x_y(self.loss_hist)
         plt.plot(x, y)
-        plt.title('Loss_{}'.format(self.i_task))
+        plt.title('Loss_task_{}'.format(self.i_task))
         plt.show()        
     
-class AccEstPipeline(Pipeline):
+class AccEstPipeline(StatDrawer):
     '''
     This class helps to evaluate accuracy of 
     different tasks during training.
@@ -314,6 +314,20 @@ class AccEstPipeline(Pipeline):
     
     def before_task_train(self):
         self.acc_estimator.register_task(self.test_ds)
+    
+    def after_epoch_train(self):
+        if self.i_task == 0:
+            return
+        self.clear_output()
+        fig = plt.figure(figsize=(7, 4))
+        for i in range(self.i_task):
+            x, y = self.acc_estimator.get_task_estimations(i)
+            if len(x) > 1:
+                plt.plot(x, y, label = "task {}".format(i))
+            else:
+                plt.scatter(x, y, label = "task {}".format(i))
+            plt.legend()
+        plt.show()
     
     def after_task_train(self):
         self.acc_estimator(self.cl_model)
