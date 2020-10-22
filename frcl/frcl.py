@@ -9,6 +9,15 @@ from torch.distributions.kl import kl_divergence
 from copy import copy
 import abc
 
+def moveaxis(tensor: torch.Tensor, source: int, destination: int) -> torch.Tensor:
+    dim = tensor.dim()
+    perm = list(range(dim))
+    if destination < 0:
+        destination += dim
+    perm.pop(source)
+    perm.insert(destination, source)
+    return tensor.permute(*perm)
+
 
 def moveaxis(tensor: torch.Tensor, source: int, destination: int) -> torch.Tensor:
     dim = tensor.dim()
@@ -369,6 +378,7 @@ class FRCL(nn.Module):
             smp = torch.utils.data.DataLoader(task_dataloader.dataset,
                                               batch_size=N,
                                               shuffle=True)
+            
             Z, y = next(iter(smp))
             Z = Z.to(self.device)
 
@@ -465,6 +475,7 @@ class FRCL(nn.Module):
                   for _ in range(self.out_dim)] 
         self.mu = [Parameter(torch.normal(0, 0.1, size=(self.h_dim,)), requires_grad=True).to(self.device)\
                    for _ in range(self.out_dim)] 
+
         return
             
                 

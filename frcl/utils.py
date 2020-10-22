@@ -1,5 +1,6 @@
 import torch
 from torch.utils.data import DataLoader
+from torch.utils.data import Dataset
 import abc
 
 class CLBaseEpochQualifier:
@@ -90,3 +91,53 @@ def cl_batch_to_device(batch, device='cpu'):
 def cl_batch_target_float(batch):
     for i in range(len(batch)):
         batch[i][1] = batch[i][1].float()
+
+class StatCollector:
+
+    def __init__(self, n_averaging):
+        self.n_averaging = n_averaging
+        self.collected = 0
+        self.history = []
+        self.current = 0.
+
+    def add(self, value):
+        if self.collected < self.n_averaging:
+            if isinstance(value, torch.Tensor):
+                value = value.item()
+            self.current += value
+            self.collected += 1
+
+        if self.collected == self.n_averaging:
+            self.history.append(self.current/self.n_averaging)
+            self.reset_current()
+    
+    def reset_current(self):
+        self.collected = 0
+        self.current = 0.
+    
+    def reset(self):
+        self.history = []
+        self.reset_current()
+    
+    def get_history(self, inscribe_incomplete=False, incomplete_limit=1):
+        history = self.history
+        if inscribe_incomplete:
+            assert(incomplete_limit >= 1)
+            if self.collected >= incomplete_limit:
+                history.append(self.current/self.collected)
+        return history
+
+class ScaleDataset(Dataset):
+
+    def __init__(self, dataset, n_scale):
+        self.n_scale = n_scale
+        self.dataset = dataset
+    
+    def __len__(self):
+        return len(self.dataset) * self.n_scale
+    
+    def __getitem__(self, i):
+        if i >= len(self):
+            raise IndexError("dataset index out of range")
+        i = i % len(self.dataset)
+        return self.dataset[i]
