@@ -19,14 +19,13 @@ def moveaxis(tensor: torch.Tensor, source: int, destination: int) -> torch.Tenso
     return tensor.permute(*perm)
 
 
-def moveaxis(tensor: torch.Tensor, source: int, destination: int) -> torch.Tensor:
-    dim = tensor.dim()
-    perm = list(range(dim))
-    if destination < 0:
-        destination += dim
-    perm.pop(source)
-    perm.insert(destination, source)
-    return tensor.permute(*perm)
+def base_model_eval(function):
+    def wrapper(self, *_args, **_kwargs):
+        self.base.eval()
+        res = function(self, *_args, **_kwargs)
+        self.base.train()
+        return res
+    return wrapper
 
 
 def create_torch_random_gen(value):
@@ -117,6 +116,7 @@ class CLBaseline(nn.Module, abc.ABC):
         omega = self.tasks_omegas[k]
         return self.loss_func(torch.matmul(self.base(X), omega.T).squeeze(), target)
     
+    @base_model_eval
     @torch.no_grad()
     def predict(self, x, k, get_class=False):
         '''
@@ -140,6 +140,7 @@ class CLBaseline(nn.Module, abc.ABC):
         else:
             return distr.cpu()
     
+    @base_model_eval
     @torch.no_grad()
     def select_inducing(self, task_dataset, N=100, criterion='random'):
         '''
@@ -323,7 +324,7 @@ class FRCL(nn.Module):
 
         return -elbo
 
-
+    @base_model_eval
     @torch.no_grad()
     def get_predictive(self, x, k):
         """ Computes predictive distribution according to section 2.5
@@ -367,6 +368,7 @@ class FRCL(nn.Module):
         predicted /= MC_samples
         return predicted
 
+    @base_model_eval
     @torch.no_grad()
     def select_inducing(self, task_dataloader, N=100, criterion="random"):
         """
@@ -461,7 +463,7 @@ class FRCL(nn.Module):
                 return Z
             
             Z = find_best_inducing_points()
-
+        
         phi = self.base(Z)
         mu_u = [phi @ self.mu[i] for i in range(self.out_dim)]
         L_u = [phi @ self.L[i] for i in range(self.out_dim)]
@@ -471,14 +473,10 @@ class FRCL(nn.Module):
         self.prev_tasks_distr.append([MultivariateNormal(loc=mu_u[i],
                                     covariance_matrix=cov[i]) for i in range(self.out_dim)])
         self.prev_tasks_tensors.append(Z)
-        self.L = [Parameter(torch.eye(self.h_dim), requires_grad=True).to(self.device) \
-                  for _ in range(self.out_dim)] 
-        self.mu = [Parameter(torch.normal(0, 0.1, size=(self.h_dim,)), requires_grad=True).to(self.device)\
-                   for _ in range(self.out_dim)] 
 
         return
             
-                
+    @base_model_eval           
     @torch.no_grad()
     def detect_boundary(self, x, l_old, return_p_value=False):
         """Given new batch x and kl divergence for previous minibatch l_old
