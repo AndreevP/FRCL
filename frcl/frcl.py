@@ -248,10 +248,10 @@ class FRCL(nn.Module):
         self.out_dim = out_dim
         self.out_dims.append(out_dim)
 
-        self.L = [Parameter(torch.eye(self.h_dim), requires_grad=True).to(self.device) \
-                  for _ in range(self.out_dim)] 
-        self.mu = [Parameter(torch.normal(0, 0.1, size=(self.h_dim,)), requires_grad=True).to(self.device)\
-                   for _ in range(self.out_dim)]  
+        self.L = ParameterList([Parameter(torch.eye(self.h_dim).to(self.device), requires_grad=True) \
+                  for _ in range(self.out_dim)]) 
+        self.mu = ParameterList([Parameter(torch.normal(0, 0.1, size=(self.h_dim,)).to(self.device), requires_grad=True) \
+                   for _ in range(self.out_dim)])  
 
     def __len__(self):
         return len(self.prev_tasks_tensors)
