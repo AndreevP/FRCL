@@ -9,6 +9,7 @@ from torch.distributions.kl import kl_divergence
 from copy import copy
 import abc
 
+
 def moveaxis(tensor: torch.Tensor, source: int, destination: int) -> torch.Tensor:
     dim = tensor.dim()
     perm = list(range(dim))
@@ -40,26 +41,28 @@ class CLBaseline(nn.Module, abc.ABC):
         return len(self.tasks_replay_buffers)
 
     def __init__(
-        self, base_model, h_dim, out_dim=1, device='cpu', 
+        self, base_model, h_dim, multiclass=False, device='cpu', 
         seed=None):
         '''
         :Parameters:
         base_model: torch.nn.Module: task-agnostic model
         h_dim: int: dimension of base_model output
-        out_dim: output dimension of task-specific tensor \omega
+        multiclass: bool: kind of tasks we will solve
         (dimension of loss_function input)
         '''
         super().__init__()
         self.base = base_model
         self.h_dim = h_dim
-        self.out_dim = out_dim
         self.device = device
+        self.multiclass = multiclass
         #replay buffers for the previous tasks (includes torch.utils.data.Subsets)
         self.tasks_replay_buffers = []
         #task-specific tensors (which applied to base model outputs)
         self.tasks_omegas = ParameterList()
+        # out dims for subsequent tasks
+        self.out_dims = []
 
-        if out_dim == 1:
+        if not self.multiclass:
             # computes loss
             self.loss_func = nn.BCEWithLogitsLoss()
 
@@ -70,7 +73,7 @@ class CLBaseline(nn.Module, abc.ABC):
         
             self.pred_func = pred_func
         
-        if out_dim > 1:
+        if self.multiclass:
             self.loss_func = nn.CrossEntropyLoss()
             self.pred_func = nn.Softmax()
         
@@ -85,12 +88,18 @@ class CLBaseline(nn.Module, abc.ABC):
     def create_replay_buffer(self, dataset):
         pass
     
-    def create_new_task(self):
+    def create_new_task(self, out_dim):
         '''
         Create new task-specific tensor \omega
         :Parameters:
         classes: list: list of target classes
         '''
+        if self.multiclass:
+            assert(out_dim > 1)
+        else:
+            assert(out_dim == 1)
+        self.out_dim = out_dim
+        self.out_dims.append(out_dim)
         w = Parameter(torch.randn(
             (self.out_dim, self.h_dim), generator=self.torch_gen).to(self.device))
         self.tasks_omegas.append(w)
@@ -190,10 +199,9 @@ def kl(m1, S1, m2, S2):
                   - S1.shape[0] + torch.logdet(S2) - torch.logdet(S1))
         
 class FRCL(nn.Module):
-    def __init__(self, base_model, h_dim, device, sigma_prior=1, out_dim=1):
+    def __init__(self, base_model, h_dim, device, sigma_prior=1, multiclass=False):
         super(FRCL, self).__init__()
         
-        self.out_dim = out_dim
         self.h_dim = h_dim
         self.sigma_prior = sigma_prior
         self.device = device
@@ -203,8 +211,9 @@ class FRCL(nn.Module):
         self.prev_tasks_tensors = [] #previous tasks as torch tensors
         self.quadr = GaussHermiteQuadrature1D().to(device)
         self.base = base_model.to(device)
+        self.multiclass = multiclass
         
-        if out_dim == 1:
+        if not multiclass:
             # computes loss
             self.loss_func = nn.BCEWithLogitsLoss(reduction='none')
 
@@ -214,15 +223,26 @@ class FRCL(nn.Module):
                 return torch.stack([1. - pred, pred], dim=-1).squeeze()
             self.pred_func = pred_func
            
-        if out_dim > 1:
+        if multiclass:
             self.loss_func = nn.CrossEntropyLoss(reduction='none')
-            self.pred_func = nn.Softmax()    
-            
-        self.L = [Parameter(torch.eye(h_dim), requires_grad=True).to(device) for _ in range(out_dim)] 
-        self.mu = [Parameter(torch.normal(0, 0.1, size=(h_dim,)), requires_grad=True).to(device) for _ in range(out_dim)]
-        self.w_distr = [MultivariateNormal(self.mu[i], scale_tril=self.L[i]) for i in range(out_dim)] 
-            
-    
+            self.pred_func = nn.Softmax()   
+
+        # out dims for subsequent tasks
+        self.out_dims = [] 
+
+    def create_new_task(self, out_dim):
+        if self.multiclass:
+            assert(out_dim > 1)
+        else:
+            assert(out_dim == 1)
+        self.out_dim = out_dim
+        self.out_dims.append(out_dim)
+
+        self.L = [Parameter(torch.eye(self.h_dim), requires_grad=True).to(self.device) \
+                  for _ in range(self.out_dim)] 
+        self.mu = [Parameter(torch.normal(0, 0.1, size=(self.h_dim,)), requires_grad=True).to(self.device)\
+                   for _ in range(self.out_dim)]  
+
     def __len__(self):
         return len(self.prev_tasks_tensors)
        
@@ -273,6 +293,7 @@ class FRCL(nn.Module):
             curr_task_kls = -kls.item()
 
         for i in range(len(self.prev_tasks_distr)):
+            out_dim = self.out_dims[i]
             phi_i = self.base(self.prev_tasks_tensors[i])
             cov_i = phi_i @ phi_i.T + torch.eye(phi_i.shape[0]).to(self.device) * 1e-6
            # p_u = MultivariateNormal(torch.zeros(cov_i.shape[0]).to(self.device),
@@ -280,7 +301,7 @@ class FRCL(nn.Module):
            # kls -= sum([kl_divergence(self.prev_tasks_distr[i][j], p_u) for j in range(self.out_dim)])
             prev_cls = sum([kl(self.prev_tasks_distr[i][j].mean, self.prev_tasks_distr[i][j].covariance_matrix,
                           torch.zeros(cov_i.shape[0]).to(self.device), cov_i * self.sigma_prior) \
-                       for j in range(self.out_dim)])
+                       for j in range(out_dim)])
             if state is not None:
                 state.kls.append(prev_cls.item())
             kls -= prev_cls
@@ -307,21 +328,22 @@ class FRCL(nn.Module):
         k_xz = phi_x @ phi_z.T * self.sigma_prior
         k_zz = phi_z @ phi_z.T * self.sigma_prior + torch.eye(phi_z.shape[0]).to(self.device) * 1e-4
         k_zz_ = torch.inverse(k_zz)
-        mu_u = [self.prev_tasks_distr[k][i].mean for i in range(self.out_dim)]
-        cov_u = [self.prev_tasks_distr[k][i].covariance_matrix for i in range(self.out_dim)]
+        out_dim = self.out_dims[k]
+        mu_u = [self.prev_tasks_distr[k][i].mean for i in range(out_dim)]
+        cov_u = [self.prev_tasks_distr[k][i].covariance_matrix for i in range(out_dim)]
 
-        mu = [phi_x @ phi_z.T @ k_zz_ @  mu_u[i] for i in range(self.out_dim)]
-        sigma = [k_xx + k_xz @ k_zz_ @ (cov_u[i]  - k_zz) @ k_zz_ @ k_xz.T for i in range(self.out_dim)]
+        mu = [phi_x @ phi_z.T @ k_zz_ @  mu_u[i] for i in range(out_dim)]
+        sigma = [k_xx + k_xz @ k_zz_ @ (cov_u[i]  - k_zz) @ k_zz_ @ k_xz.T for i in range(out_dim)]
         sigma = [sigma[i] * torch.eye(sigma[i].shape[0]).to(self.device)+\
                  torch.eye(sigma[i].shape[0]).to(self.device) * 1e-6\
-                 for i in range(self.out_dim)] 
+                 for i in range(out_dim)] 
       #  print([s.min() for s in sigma])
         sigma = [torch.clamp(sigma[i], min=0, max=100.)+\
                  torch.eye(sigma[i].shape[0]).to(self.device) * 1e-3\
-                 for i in range(self.out_dim)]    
+                 for i in range(out_dim)]    
                                                              #we are interested only 
-                                                             #in diagonal part for inference 
-        return [MultivariateNormal(loc=mu[i], covariance_matrix=sigma[i]) for i in range(self.out_dim)]
+                                                             #in diagonal part for inference ?
+        return [MultivariateNormal(loc=mu[i], covariance_matrix=sigma[i]) for i in range(out_dim)]
 
     @torch.no_grad()
     def predict(self, x, k, MC_samples=20):
@@ -329,8 +351,9 @@ class FRCL(nn.Module):
         """
         distr = self.get_predictive(x.to(self.device), k)
         predicted = 0
+        out_dim = self.out_dims[k]
         for i in range(MC_samples):
-            sample = [distr[i].sample() for i in range(self.out_dim)]
+            sample = [distr[i].sample() for i in range(out_dim)]
             predicted += self.pred_func(torch.stack(sample, axis=1))
         predicted /= MC_samples
         return predicted
@@ -377,7 +400,7 @@ class FRCL(nn.Module):
             def find_best_inducing_points(start_inducing_set="random",
                                           task_dataloader=task_dataloader, 
                                           max_iter=300, 
-                                          early_stop_num_iter=60,
+                                          early_stop_num_iter=80,
                                           verbose=True):
                 
                 """Sequentially adds a new point instead of a random one in
@@ -469,7 +492,6 @@ class FRCL(nn.Module):
                                           for i in range(len(l_old))])
         t, p_value = ttest_indest_ind(l_old, l_new, equal_var=False)    
         return l_new, t, p if return_p_value else l_new, t
-    
 
 if __name__ == "__main__":
     clb = CLBaseline(None, None)
