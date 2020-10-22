@@ -4,9 +4,20 @@ from torch.nn import ParameterList, Parameter
 import torch.nn.functional as F
 from torch.utils.data import Subset, DataLoader
 from torch.distributions.multivariate_normal import MultivariateNormal
-from .quadrature import GaussHermiteQuadrature1D
+from frcl.quadrature import GaussHermiteQuadrature1D
 from torch.distributions.kl import kl_divergence
+from copy import copy
 import abc
+
+def moveaxis(tensor: torch.Tensor, source: int, destination: int) -> torch.Tensor:
+    dim = tensor.dim()
+    perm = list(range(dim))
+    if destination < 0:
+        destination += dim
+    perm.pop(source)
+    perm.insert(destination, source)
+    return tensor.permute(*perm)
+
 
 def moveaxis(tensor: torch.Tensor, source: int, destination: int) -> torch.Tensor:
     dim = tensor.dim()
@@ -358,37 +369,140 @@ class FRCL(nn.Module):
 
     @torch.no_grad()
     def select_inducing(self, task_dataloader, N=100, criterion="random"):
-        """Given task dataloader compute N inducing points
-           Updates self.prev_tasks_distr and self.prev_tasks_tensors
         """
+        Given task dataloader compute N inducing points
+        Updates self.prev_tasks_distr and self.prev_tasks_tensors
+        """
+        
         if (criterion=="random"):
             smp = torch.utils.data.DataLoader(task_dataloader.dataset,
                                               batch_size=N,
                                               shuffle=True)
-            X, y = next(iter(smp))
-            X = X.to(self.device)
-            phi = self.base(X)
-            mu_u = [phi @ self.mu[i] for i in range(self.out_dim)]
-            L_u = [phi @ self.L[i] for i in range(self.out_dim)]
-            cov = [L_u[i] @ L_u[i].T for i in range(self.out_dim)]
-            #regularization
-            cov = [cov[i] + torch.eye(cov[i].shape[0]).to(self.device) * 1e-6 for i in range(self.out_dim)]
-            self.prev_tasks_distr.append([MultivariateNormal(loc=mu_u[i],
-                                         covariance_matrix=cov[i]) for i in range(self.out_dim)])
-            self.prev_tasks_tensors.append(X)    
+            
+            Z, y = next(iter(smp))
+            Z = Z.to(self.device)
+
+        if (criterion=="deterministic"):
+
+            def calculate_induce_quality_statistic(inducing_points):
+                """
+                Calculates trace statistic of inducing cquality 
+                (up to multiplication by prior variance)
+                """
+                statistic = 0
+                
+                loader_for_batch_computation = torch.utils.data.DataLoader(
+                                              task_dataloader.dataset,
+                                              batch_size=2000,
+                                              shuffle=False)
+                
+                phi_z = self.base(inducing_points.to(device))
+                k_zz = phi_z @ phi_z.T
+                inv_k_zz = torch.inverse(k_zz +\
+                 torch.eye(k_zz.shape[0]).to(self.device) * 1e-3)
+                for x_batch, _ in loader_for_batch_computation:
+                    phi_x = self.base(x_batch.to(device))
+                    k_xz = phi_x @ phi_z.T
+                    k_xx = phi_x @ phi_x.T
+                    statistic += torch.trace(k_xx - k_xz @ inv_k_zz @ k_xz.T)
+                return statistic
+            
+            def find_best_inducing_points(start_inducing_set="random",
+                                          task_dataloader=task_dataloader, 
+                                          max_iter=300, 
+                                          early_stop_num_iter=80,
+                                          verbose=True):
+                
+                """Sequentially adds a new point instead of a random one in
+                the initial set of inducing points, if the value of the statstic
+                above lessens, and does not do anything otherwise.
+                - start_inducing_set: list of points to start from
+                - max_iter: maximum number of tries to add a point
+                """
+                
+                if start_inducing_set == "random":
+                    random_points = torch.utils.data.DataLoader(task_dataloader.dataset,
+                                              batch_size=N,
+                                              shuffle=True)
+                    Z, _ = next(iter(random_points))
+                    Z = Z.to(self.device)
+                else:
+                    assert len(start_inducing_set) == N 
+                    assert isinstance(start_inducing_set[0], torch.Tensor)
+                    Z = start_inducing_set.to(self.device)
+                 
+
+                potential_points, _ = next(iter(torch.utils.data.DataLoader(
+                                      task_dataloader.dataset,
+                                      batch_size=max_iter,
+                                      shuffle=True)))
+                
+                T = calculate_induce_quality_statistic(Z)
+                new_point_counter = 0
+                early_stop_counter = 0
+                for i, point in enumerate(potential_points):
+                    Z_new = copy(Z)
+                    Z_new[np.random.randint(0, N)] = point
+                    T_new = calculate_induce_quality_statistic(Z_new)
+                    if T_new < T:
+                        T, Z = T_new, Z_new
+                        new_point_counter += 1
+                        early_stop_counter = 0
+                    else:
+                         early_stop_counter += 1
+                    if verbose and i % 10 == 0:
+                       print("Iteration {} out of {} is in progress".
+                             format(i, max_iter))
+                       print("Current best statistic is ", round(T.item(), 3))
+                       print("New points added ", new_point_counter, '\n')
+                    if early_stop_counter == early_stop_num_iter:
+                        print("Early stop activated!")
+                        break
+                return Z
+            
+            Z = find_best_inducing_points()
+
+        phi = self.base(Z)
+        mu_u = [phi @ self.mu[i] for i in range(self.out_dim)]
+        L_u = [phi @ self.L[i] for i in range(self.out_dim)]
+        cov = [L_u[i] @ L_u[i].T for i in range(self.out_dim)]
+        #regularization
+        cov = [cov[i] + torch.eye(cov[i].shape[0]).to(self.device) * 1e-6 for i in range(self.out_dim)]
+        self.prev_tasks_distr.append([MultivariateNormal(loc=mu_u[i],
+                                    covariance_matrix=cov[i]) for i in range(self.out_dim)])
+        self.prev_tasks_tensors.append(Z)
+        self.L = [Parameter(torch.eye(self.h_dim), requires_grad=True).to(self.device) \
+                  for _ in range(self.out_dim)] 
+        self.mu = [Parameter(torch.normal(0, 0.1, size=(self.h_dim,)), requires_grad=True).to(self.device)\
+                   for _ in range(self.out_dim)] 
+
         return
             
                 
     @torch.no_grad()
-    def detect_boundary(self, x, l_old):
+    def detect_boundary(self, x, l_old, return_p_value=False):
         """Given new batch x and kl divergence for previous minibatch l_old
            compute l_new and perform statistical test
            Returns l_new and indicator of significance (0 or 1)
         """
-        pass
-
-            
-            
+        assert len(x) == len(l_old)
+        
+        def gaus_sym_kl(p_mu, p_var, q_mu, q_var, dim=1):
+            inv_p_var = torch.inverse(p_var)
+            inv_q_var = torch.inverse(q_var)
+            return (torch.trace(inv_p_var @ q_var + inv_q_var @ p_var) - 2 * dim + \
+               (p_mu - q_mu).T @ (inv_p_var + inv_q_var) @ (p_mu - q_mu)) / 4
+        
+        phi_x = self.base(x)
+        p_covar = self.sigma_prior ** 2 * phi_x @ phi_x.T + 1e-6 * torch.eye(phi_x.shape[0])
+        p_mu = torch.zeros(len(l_old))
+        q_dists = self.get_predictive(x, -1, return_distr=False)
+        q_mus, q_covars = zip(*[(dist.mean, dist.covariance_matrix) for dist in q_dists])
+        l_new = torch.Tensor([gaus_sym_kl(p_mu, p_covar, q_mus[i], q_covars[i], 
+                                          dim=self.out_dim) 
+                                          for i in range(len(l_old))])
+        t, p_value = ttest_indest_ind(l_old, l_new, equal_var=False)    
+        return l_new, t, p if return_p_value else l_new, t
 
 if __name__ == "__main__":
     clb = CLBaseline(None, None)
