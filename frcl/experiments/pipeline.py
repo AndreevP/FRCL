@@ -321,15 +321,7 @@ class AccEstPipeline(StatDrawer):
         if self.i_task == 0:
             return
         self.clear_output()
-        fig = plt.figure(figsize=(7, 4))
-        for i in range(self.i_task):
-            x, y = self.acc_estimator.get_task_estimations(i)
-            if len(x) > 1:
-                plt.plot(x, y, label = "task {}".format(i))
-            else:
-                plt.scatter(x, y, label = "task {}".format(i))
-            plt.legend()
-        plt.show()
+        self.acc_estimator.draw_task_estimations(self.i_task)
     
     def after_task_train(self):
         self.acc_estimator(self.cl_model)

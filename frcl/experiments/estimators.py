@@ -2,6 +2,7 @@ import torch
 import abc
 from torch.utils.data import DataLoader
 import numpy as np
+import matplotlib.pyplot as plt
 
 class TaskEstimator(abc.ABC):
 
@@ -98,6 +99,22 @@ class TasksEstimator(abc.ABC):
         
         raise Exception(
             "format type '{}' is not implemented".format(format))
+    
+    def draw_task_estimations(self, n_tasks, figsize=(7, 4)):
+        '''
+        Draws estimations of all tasks
+        '''
+        if n_tasks == 0:
+            return
+        fig = plt.figure(figsize=figsize)
+        for i in range(n_tasks):
+            x, y = self.get_task_estimations(i)
+            if len(x) > 1:
+                plt.plot(x, y, label = "task {}".format(i))
+            else:
+                plt.scatter(x, y, label = "task {}".format(i))
+            plt.legend()
+        plt.show()
     
     def get_solver_estimations(self, n, format='plt'):
         '''
