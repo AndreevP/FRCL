@@ -393,7 +393,7 @@ class FRCL(nn.Module):
                 
                 loader_for_batch_computation = torch.utils.data.DataLoader(
                                               task_dataloader.dataset,
-                                              batch_size=2000,
+                                              batch_size=500,
                                               shuffle=False)
                 
                 phi_z = self.base(inducing_points.to(device))
