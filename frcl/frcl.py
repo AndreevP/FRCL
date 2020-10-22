@@ -339,19 +339,21 @@ class FRCL(nn.Module):
         phi_z = self.base(self.prev_tasks_tensors[k])
         k_xx = phi_x @ phi_x.T * self.sigma_prior
         k_xz = phi_x @ phi_z.T * self.sigma_prior
-        k_zz = phi_z @ phi_z.T * self.sigma_prior + torch.eye(phi_z.shape[0]).to(self.device) * 1e-6
-        k_zz_ = torch.inverse(k_zz)
+        k_zz = phi_z @ phi_z.T * self.sigma_prior 
+        k_zz_ = torch.inverse(k_zz + torch.eye(phi_z.shape[0]).to(self.device) * 1e-3)
         out_dim = self.out_dims[k]
         mu_u = [self.prev_tasks_distr[k][i].mean for i in range(out_dim)]
         cov_u = [self.prev_tasks_distr[k][i].covariance_matrix for i in range(out_dim)]
 
         mu = [phi_x @ phi_z.T @ k_zz_ @  mu_u[i] for i in range(out_dim)]
-        sigma = [k_xx + k_xz @ k_zz_ @ (cov_u[i]  - k_zz) @ k_zz_ @ k_xz.T for i in range(out_dim)]
+        sigma = [k_xx + k_xz @ k_zz_ @ (cov_u[i]  - k_zz + \
+                                        torch.eye(k_zz.shape[0]).to(self.device) * 1e-4) \
+                                        @ k_zz_ @ k_xz.T for i in range(out_dim)]
         sigma = [sigma[i] * torch.eye(sigma[i].shape[0]).to(self.device)+\
                  torch.eye(sigma[i].shape[0]).to(self.device) * 1e-6\
                  for i in range(out_dim)] 
-      #  print([s.min() for s in sigma])
-        sigma = [torch.clamp(sigma[i], min=0, max=100.)+\
+        print([s.min() for s in sigma])
+        sigma = [torch.clamp(sigma[i], min=0, max=10000.)+\
                  torch.eye(sigma[i].shape[0]).to(self.device) * 1e-6\
                  for i in range(out_dim)]    
                                                              #we are interested only 
