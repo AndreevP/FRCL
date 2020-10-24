@@ -31,9 +31,9 @@ We results are also summarized in the table below.
 | ------------- | ------------- | ------------- | ------------- | ------------- |  ------------- | 
 | Split-MNIST  | baseline  | 2 | -  | 0.981 | - |
 | Split-MNIST  | baseline   | 40 | -  | 0.985 | 0.958 |
-| Split-MNIST  | FRCL   | 2 | Random  | 0.724 | 0.598|
+| Split-MNIST  | FRCL   | 2 | Random  | 0.827 | 0.598|
 | Split-MNIST  | FRCL   | 2 | Trace  | 0.82 | 0.82 |
-| Split-MNIST  | FRCL   | 40 | Random  | 0.974 | 0.971 |
+| Split-MNIST  | FRCL   | 40 | Random  | 0.986 | 0.971 |
 | Split-MNIST  | FRCL   | 40 | Trace  | 0.979 | 0.978 |
 | Permuted-MNIST  | baseline  | 10 | -  | 0.695 | 0.486|
 | Permuted-MNIST | baseline   | 80 | -  | 0.865 | - |
