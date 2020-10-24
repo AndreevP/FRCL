@@ -109,11 +109,10 @@ class TasksEstimator(abc.ABC):
         fig = plt.figure(figsize=figsize)
         for i in range(n_tasks):
             x, y = self.get_task_estimations(i)
-            if len(x) > 1:
-                plt.plot(x, y, label = "task {}".format(i))
-            else:
-                plt.scatter(x, y, label = "task {}".format(i))
-            plt.legend()
+            plt.plot(x, y, "-o", label = "task {}".format(i))
+        plt.xlabel('observed tasks')
+        plt.ylabel('accuracy')
+        plt.legend()
         plt.show()
     
     def get_solver_estimations(self, n, format='plt'):

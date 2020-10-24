@@ -309,7 +309,7 @@ class AccEstPipeline(StatDrawer):
     '''
     def __init__(self, *args, draw_each_epoch=True, **kwargs):
         super().__init__(*args, **kwargs)
-        self.draw_each_epoch = False
+        self.draw_each_epoch = draw_each_epoch
 
     def before_run(self):
         self.acc_estimators = []

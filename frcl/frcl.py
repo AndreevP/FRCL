@@ -8,6 +8,7 @@ from frcl.quadrature import GaussHermiteQuadrature1D
 from torch.distributions.kl import kl_divergence
 from copy import copy
 import abc
+import numpy as np
 
 def moveaxis(tensor: torch.Tensor, source: int, destination: int) -> torch.Tensor:
     dim = tensor.dim()
@@ -406,12 +407,12 @@ class FRCL(nn.Module):
                                               batch_size=500,
                                               shuffle=False)
                 
-                phi_z = self.base(inducing_points.to(device))
+                phi_z = self.base(inducing_points.to(self.device))
                 k_zz = phi_z @ phi_z.T
                 inv_k_zz = torch.inverse(k_zz +\
                  torch.eye(k_zz.shape[0]).to(self.device) * 1e-3)
                 for x_batch, _ in loader_for_batch_computation:
-                    phi_x = self.base(x_batch.to(device))
+                    phi_x = self.base(x_batch.to(self.device))
                     k_xz = phi_x @ phi_z.T
                     k_xx = phi_x @ phi_x.T
                     statistic += torch.trace(k_xx - k_xz @ inv_k_zz @ k_xz.T)

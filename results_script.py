@@ -102,7 +102,7 @@ settings = {
                             'batch_size': 100,
                             'n_inducing': 200                    
                         }
-                    }
+                    },
                     {
                         'pipeline': RS_BaselineTrain,
                         'settings': {
