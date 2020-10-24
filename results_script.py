@@ -36,17 +36,21 @@ settings = {
                     {
                         'pipeline': RS_FRCLTrain,
                         'settings': {
-                            # YOUR SETTINGS
-                            'init_mu_sigma':1., # SET YOUR INIT_MU_SIGMA
-                            'n_inducing': 2
+                            'n_epochs': 4,
+                            'lr': 1e-4,
+                            'batch_size': 64,
+                            'n_inducing': 2,
+                            'init_mu_sigma':1.
                         }
                     },
                     {
                         'pipeline': RS_FRCLTrain,
                         'settings': {
-                            # YOUR SETTINGS
-                            'init_mu_sigma':1., # SET YOUR INIT_MU_SIGMA
-                            'n_inducing': 40
+                            'n_epochs': 4,
+                            'lr': 1e-4,
+                            'batch_size': 64,
+                            'n_inducing': 40,
+                            'init_mu_sigma':1.
                         }
                     }
                 ],
@@ -54,8 +58,10 @@ settings = {
                     {
                         'pipeline': RS_FRCLTrain,
                         'settings': {
-                            # YOUR SETTINGS
-                            'init_mu_sigma':1., # SET YOUR INIT_MU_SIGMA
+                            'n_epochs': 4,
+                            'lr': 1e-4,
+                            'batch_size': 64,
+                            'init_mu_sigma':1.,
                             'inducing_criterion': "deterministic",
                             'n_inducing': 2
                         },
@@ -63,8 +69,10 @@ settings = {
                     {
                         'pipeline': RS_FRCLTrain,
                         'settings': {
-                            # YOUR SETTINGS
-                            'init_mu_sigma':1., # SET YOUR INIT_MU_SIGMA
+                            'n_epochs': 4,
+                            'lr': 1e-4,
+                            'batch_size': 64,
+                            'init_mu_sigma':1., 
                             'inducing_criterion': "deterministic",
                             'n_inducing': 40
                         }
@@ -108,10 +116,22 @@ settings = {
                         }
                     },
                     {
-                        'pipeline': 'YOUR PIPELINE',
+                        'pipeline': RS_FRCLTrain,
                         'settings': {
-                            # YOUR SETTINGS
-                            'init_mu_sigma':1., # SET YOUR INIT_MU_SIGMA
+                            'n_epochs': 8,
+                            'lr': 1e-4,
+                            'init_mu_sigma': 0.1,
+                            'batch_size': 64,
+                            'n_inducing': 10
+                        }
+                    },                
+                    {
+                        'pipeline': RS_FRCLTrain,
+                        'settings': {
+                            'n_epoch': 8,
+                            'batch_size': 64,
+                            'lr': 1e-4,
+                            'init_mu_sigma':1., 
                             'n_inducing': 200
                         }
                     }
@@ -134,10 +154,11 @@ settings = {
                 ],
             'frcl_random': [
                     {
-                        'pipeline': "YOUR PIPELINE",
+                        'pipeline': RS_FRCLTrain,
                         'settings': {
-                            # YOUR CODE HERE
-                            'init_mu_sigma':1., # SET YOUR INIT_MU_SIGMA
+                            'n_epochs': 8,
+                            'lr': 1e-3,                            
+                            'init_mu_sigma':1., 
                             'n_inducing': 60
                         }
                     }
