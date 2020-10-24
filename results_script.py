@@ -114,17 +114,7 @@ settings = {
                             'batch_size': 32,
                             'n_inducing': 10
                         }
-                    },
-                    {
-                        'pipeline': RS_FRCLTrain,
-                        'settings': {
-                            'n_epochs': 8,
-                            'lr': 1e-4,
-                            'init_mu_sigma': 0.1,
-                            'batch_size': 64,
-                            'n_inducing': 10
-                        }
-                    },                
+                    },               
                     {
                         'pipeline': RS_FRCLTrain,
                         'settings': {
