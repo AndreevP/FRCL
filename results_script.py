@@ -103,6 +103,15 @@ settings = {
                             'n_inducing': 200                    
                         }
                     }
+                    {
+                        'pipeline': RS_BaselineTrain,
+                        'settings': {
+                            'n_epochs': 6,
+                            'lr': 1e-4,
+                            'batch_size': 100,
+                            'n_inducing': 80
+                        }
+                    }
                 ],
             'frcl_random': [
                     {
