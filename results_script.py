@@ -184,6 +184,8 @@ res = pipeline.run()
 for i in range(len(task)):
     x, y = res[0][0].get_task_estimations(i)
     plt.plot(x, y, "-o", label = "task {}".format(i))
+    plt.xlabel('observed tasks')
+    plt.ylabel('accuracy')
     plt.legend()
 
 mean = np.mean(res[0][0].get_solver_estimations(len(task))[1])
