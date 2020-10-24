@@ -46,7 +46,7 @@ class Pipeline(abc.ABC):
         setattr(self, name, value)
 
     def __init__(self, task_provider, n_inducing=10, 
-        inducing_criterion='random', n_repeat=10, device='cuda', 
+        inducing_criterion='random', n_repeat=1, device='cuda', 
         batch_size=32, lr=1e-3, n_epochs=10, n_classes=None):
         '''
         :Parameters:
@@ -307,6 +307,9 @@ class AccEstPipeline(StatDrawer):
     different tasks during training.
     See AccuracyTasksEstimator to get into details
     '''
+    def __init__(self, *args, draw_each_epoch=True, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.draw_each_epoch = False
 
     def before_run(self):
         self.acc_estimators = []
@@ -318,10 +321,11 @@ class AccEstPipeline(StatDrawer):
         self.acc_estimator.register_task(self.test_ds)
     
     def after_epoch_train(self):
-        if self.i_task == 0:
-            return
-        self.clear_output()
-        self.acc_estimator.draw_task_estimations(self.i_task)
+        if self.draw_each_epoch:
+            if self.i_task == 0:
+                return
+            self.clear_output()
+            self.acc_estimator.draw_task_estimations(self.i_task)
     
     def after_task_train(self):
         self.acc_estimator(self.cl_model)
@@ -331,6 +335,71 @@ class AccEstPipeline(StatDrawer):
     
     def run_return(self):
         return self.acc_estimators
+
+class InitMuSigmaExponScheduler(Pipeline):
+
+    def __init__(self, *args, mu_expon_factor=1.38, **kwargs):
+        super().__init__(*args, **kwargs)
+        assert hasattr(self, 'init_mu_sigma'), 'init_mu_sigma parameter must be specified to be scheduled'
+        self.mu_expon_factor = 1.38
+    
+    def after_task_train(self):
+        self.init_mu_sigma *= self.mu_expon_factor
+
+class FRCLBoundaryPipeline(StatDrawer):
+
+    def __init__(self, *args, start_time=10, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.start_time=10
+    
+    def before_cl_cycle(self):
+        self.l_histories = []
+        self.t_histories = []
+    
+    def before_task_train(self):
+        self.l_history = []
+        self.t_history = []
+        self.curr_start_time = self.start_time
+    
+    def before_epoch_train(self):
+        self.l_epoch_history = []
+        self.t_epoch_history = []
+        for _ in range(self.curr_start_time):
+            self.t_epoch_history.append(0.)
+    
+    def after_batch_train(self):
+        if self.i_batch < self.curr_start_time:
+            l = self.cl_model.compute_symkl(self.X)
+            self.l_epoch_history.append(l)
+            self.curr_start_time -= 1
+            return
+        if len(self.l_epoch_history) > 0:
+            l_old = self.l_epoch_history[-1]
+        else:
+            l_old = self.l_history[-1][-1]
+        l_new, t = self.cl_model.detect_boundary(self.X, l_old)
+        self.l_epoch_history.append(l_new)
+        self.t_epoch_history.append(t)
+    
+    def after_epoch_train(self):
+        self.l_history.append(self.l_epoch_history)
+        self.t_history.append(self.t_epoch_history)
+    
+    def after_task_train(self):
+        self.clear_output()
+        fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+        x, y = make_x_y(self.l_history)
+        axes[0].plot(x, y, label='l history')
+        axes[0].legend()
+        x, y = make_x_y(self.t_history)
+        x = x[self.start_time:]
+        y = y[self.start_time:]
+        axes[1].plot(x, y, label='t history')
+        axes[1].legend()
+        plt.show()      
+        self.l_histories.append(self.l_history)
+        self.t_histories.append(self.t_history)
+
 
 class BaselinePipeline(Pipeline):
     '''
@@ -371,12 +440,13 @@ class FRCLPipeline(Pipeline):
     FRCL model
     '''
 
-    def __init__(self, *args, sigma_prior = 1, int_compute_method='SVI', N_samples=20, **kwargs):
+    def __init__(self, *args, sigma_prior = 1, int_compute_method='SVI', N_samples=20, init_mu_sigma=1.0, **kwargs):
         '''
         :Parameters:
         int_compute_method: str: method to comute expectation
         N_samples : int : count of points to estimate expectation
         '''
+        self.init_mu_sigma = init_mu_sigma
         super().__init__(*args, **kwargs)
         self.sigma_prior = sigma_prior
         self.int_compute_method = int_compute_method
@@ -388,11 +458,11 @@ class FRCLPipeline(Pipeline):
             multiclass = False
         cl_model = FRCL(
             self.base_model, self.base_model.hid, 
-            self.device, sigma_prior=self.sigma_prior, multiclass=multiclass)
+            self.device, sigma_prior=self.sigma_prior, multiclass=multiclass, init_mu_sigma = self.init_mu_sigma)
         return cl_model
     
     def before_task_train(self):
-        self.cl_model.create_new_task(self.get_out_dim())
+        self.cl_model.create_new_task(self.get_out_dim(), init_mu_sigma=self.init_mu_sigma)
 
     def before_batch_train(self):
         if self.n_classes == 2:
@@ -432,4 +502,13 @@ class FRCLTrainDemo(FRCLPipeline, AccEstPipeline, LossEstPipeline):
     pass
 
 class FRCLStatTrace(FRCLPipelineState, AccEstPipeline, FRCLStatsObsPipeline, LossEstPipeline):
+    pass
+
+class RS_FRCLTrain(FRCLPipeline, AccEstPipeline):
+    pass
+
+class RS_FRCLTrainExponMuSchedule(FRCLPipeline, InitMuSigmaExponScheduler, AccEstPipeline):
+    pass
+
+class RS_BaselineTrain(BaselinePipeline, AccEstPipeline):
     pass

@@ -211,7 +211,7 @@ def kl(m1, S1, m2, S2):
                   - S1.shape[0] + torch.logdet(S2) - torch.logdet(S1))
         
 class FRCL(nn.Module):
-    def __init__(self, base_model, h_dim, device, sigma_prior=1, multiclass=False):
+    def __init__(self, base_model, h_dim, device, sigma_prior=1, multiclass=False, init_mu_sigma=1.0):
         super(FRCL, self).__init__()
         
         self.h_dim = h_dim
@@ -241,19 +241,22 @@ class FRCL(nn.Module):
 
         # out dims for subsequent tasks
         self.out_dims = [] 
+        self.init_mu_sigma = init_mu_sigma
 
-    def create_new_task(self, out_dim):
+    def create_new_task(self, out_dim, init_mu_sigma=None):
         if self.multiclass:
             assert(out_dim > 1)
         else:
             assert(out_dim == 1)
         self.out_dim = out_dim
         self.out_dims.append(out_dim)
+        if init_mu_sigma is not None:
+            self.init_mu_sigma = init_mu_sigma
 
         self.L = ParameterList([Parameter(torch.eye(self.h_dim).to(self.device), requires_grad=True) \
                   for _ in range(self.out_dim)]) 
-        self.mu = ParameterList([Parameter(torch.normal(0, 1, size=(self.h_dim,)).to(self.device), requires_grad=True) \
-                   for _ in range(self.out_dim)])  
+        self.mu = ParameterList([Parameter(torch.normal(0, self.init_mu_sigma, size=(self.h_dim,)).to(self.device), requires_grad=True) \
+                   for _ in range(self.out_dim)])
 
     def __len__(self):
         return len(self.prev_tasks_tensors)
@@ -352,7 +355,7 @@ class FRCL(nn.Module):
         sigma = [sigma[i] * torch.eye(sigma[i].shape[0]).to(self.device)+\
                  torch.eye(sigma[i].shape[0]).to(self.device) * 1e-6\
                  for i in range(out_dim)] 
-        print([s.min() for s in sigma])
+        #print([s.min() for s in sigma])
         sigma = [torch.clamp(sigma[i], min=0, max=10000.)+\
                  torch.eye(sigma[i].shape[0]).to(self.device) * 1e-6\
                  for i in range(out_dim)]    
